@@ -2,6 +2,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use serde::Serialize;
 
 /// GreenCell UPS monitor and control tool.
 ///
@@ -93,6 +94,148 @@ fn parse_u8(s: &str) -> Result<u8, String> {
     }
 }
 
+// ── Full status (combines every query the UPS supports) ─────────────────────
+
+/// Everything we can read from the UPS in one shot.
+#[derive(Serialize)]
+struct FullStatus {
+    // Device identity
+    model: String,
+    protocol: String,
+    protocol_version: String,
+
+    // Nominal (rated) parameters
+    nominal_input_voltage: f64,
+    nominal_input_current: f64,
+    nominal_battery_voltage: f64,
+    nominal_input_frequency: f64,
+    battery_count: u8,
+
+    // Live electrical readings
+    input_voltage: f64,
+    input_voltage_fault: f64,
+    output_voltage: f64,
+    load_percent: f64,
+    input_frequency: f64,
+    battery_voltage: f64,
+    temperature: Option<f64>,
+
+    // Computed
+    battery_level: u8,
+
+    // Status flags
+    power_source: &'static str,
+    utility_fail: bool,
+    battery_low: bool,
+    ups_fault: bool,
+    offline: bool,
+    bypass_or_boost: bool,
+    beeper_on: bool,
+    shutdown_active: bool,
+    test_in_progress: bool,
+}
+
+impl FullStatus {
+    fn gather(ups: &gcups::Ups) -> Result<Self, gcups::Error> {
+        let status = ups.status()?;
+        let model = ups.device_info().unwrap_or_else(|_| "unknown".into());
+        let protocol = ups.protocol().unwrap_or_else(|_| "unknown".into());
+        let protocol_version = ups.protocol_version().unwrap_or_else(|_| "unknown".into());
+
+        let battery_count = (status.nominal.battery_voltage / 12.0).round() as u8;
+
+        Ok(Self {
+            model,
+            protocol,
+            protocol_version,
+            nominal_input_voltage: status.nominal.input_voltage,
+            nominal_input_current: status.nominal.input_current,
+            nominal_battery_voltage: status.nominal.battery_voltage,
+            nominal_input_frequency: status.nominal.input_frequency,
+            battery_count,
+            input_voltage: status.input_voltage,
+            input_voltage_fault: status.input_voltage_fault,
+            output_voltage: status.output_voltage,
+            load_percent: status.load_percent,
+            input_frequency: status.input_frequency,
+            battery_voltage: status.battery_voltage,
+            temperature: status.temperature,
+            battery_level: status.battery_level,
+            power_source: if status.utility_fail { "battery" } else { "mains" },
+            utility_fail: status.utility_fail,
+            battery_low: status.battery_low,
+            ups_fault: status.ups_fault,
+            offline: status.offline,
+            bypass_or_boost: status.bypass_or_boost,
+            beeper_on: status.beeper_on,
+            shutdown_active: status.shutdown_active,
+            test_in_progress: status.test_in_progress,
+        })
+    }
+
+    fn exit_code(&self) -> ExitCode {
+        if self.ups_fault {
+            ExitCode::from(3)
+        } else if self.battery_low {
+            ExitCode::from(2)
+        } else if self.utility_fail {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        }
+    }
+
+    fn print_human(&self) {
+        let yes = |b: bool| if b { "yes" } else { "no" };
+        let topology = if self.offline { "line-interactive" } else { "online (double-conversion)" };
+        let temp = self
+            .temperature
+            .map(|t| format!("{t:.1} C"))
+            .unwrap_or_else(|| "n/a".into());
+
+        println!("Device");
+        println!("  Model:              {}", self.model);
+        println!("  Protocol:           {} v{}", self.protocol, self.protocol_version);
+        println!("  Topology:           {topology}");
+        println!();
+        println!("Mains");
+        println!("  Input voltage:      {:.1} V", self.input_voltage);
+        println!("  Input frequency:    {:.1} Hz", self.input_frequency);
+        println!("  Fault voltage:      {:.1} V", self.input_voltage_fault);
+        println!();
+        println!("Output");
+        println!("  Output voltage:     {:.1} V", self.output_voltage);
+        println!("  Load:               {:.0}%", self.load_percent);
+        println!("  Temperature:        {temp}");
+        println!();
+        println!("Battery");
+        println!("  Level:              {}%", self.battery_level);
+        println!("  Voltage:            {:.1} V", self.battery_voltage);
+        println!(
+            "  Pack:               {}x 12 V ({:.0} V nominal)",
+            self.battery_count, self.nominal_battery_voltage
+        );
+        println!("  Low:                {}", yes(self.battery_low));
+        println!();
+        println!("Status");
+        println!("  Power source:       {}", self.power_source);
+        println!("  Utility fail:       {}", yes(self.utility_fail));
+        println!("  UPS fault:          {}", yes(self.ups_fault));
+        println!("  Bypass/boost:       {}", yes(self.bypass_or_boost));
+        println!("  Beeper:             {}", yes(self.beeper_on));
+        println!("  Shutdown active:    {}", yes(self.shutdown_active));
+        println!("  Test in progress:   {}", yes(self.test_in_progress));
+        println!();
+        println!("Rated");
+        println!("  Input voltage:      {:.1} V", self.nominal_input_voltage);
+        println!("  Input current:      {:.0} A", self.nominal_input_current);
+        println!("  Input frequency:    {:.1} Hz", self.nominal_input_frequency);
+        println!("  Battery voltage:    {:.1} V", self.nominal_battery_voltage);
+    }
+}
+
+// ── Main ────────────────────────────────────────────────────────────────────
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Command::Status { json: false });
@@ -117,13 +260,13 @@ fn main() -> ExitCode {
 fn run(ups: gcups::Ups, command: Command) -> Result<ExitCode, gcups::Error> {
     match command {
         Command::Status { json } => {
-            let status = ups.status()?;
+            let full = FullStatus::gather(&ups)?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&status).unwrap());
+                println!("{}", serde_json::to_string_pretty(&full).unwrap());
             } else {
-                println!("{status}");
+                full.print_human();
             }
-            Ok(status_exit_code(&status))
+            Ok(full.exit_code())
         }
 
         Command::Nominal { json } => {
@@ -221,17 +364,5 @@ fn run(ups: gcups::Ups, command: Command) -> Result<ExitCode, gcups::Error> {
             println!("Wake-up sent.");
             Ok(ExitCode::SUCCESS)
         }
-    }
-}
-
-fn status_exit_code(s: &gcups::UpsStatus) -> ExitCode {
-    if s.ups_fault {
-        ExitCode::from(3)
-    } else if s.battery_low {
-        ExitCode::from(2)
-    } else if s.utility_fail {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
     }
 }
