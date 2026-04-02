@@ -165,7 +165,37 @@ ups.toggle_beeper()?;
 | `ups.wake_up()`                 | Restore power                            |
 | `ups.read_descriptor(index)`    | Raw low-level descriptor read            |
 
-## Building
+## Installation
+
+### NixOS (flake)
+
+Add the input to your `flake.nix`:
+
+```nix
+inputs = {
+  gcups-rs = {
+    url = "github:zommiommy/gcups-rs";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
+};
+```
+
+Then either use the overlay:
+
+```nix
+nixpkgs.overlays = [ inputs.gcups-rs.overlays.default ];
+environment.systemPackages = [ pkgs.gcups ];
+```
+
+Or reference the package directly:
+
+```nix
+environment.systemPackages = [
+  inputs.gcups-rs.packages.${system}.default
+];
+```
+
+### Building from source
 
 Requires `libusb-1.0` development headers.
 
