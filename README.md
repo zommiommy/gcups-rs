@@ -225,3 +225,7 @@ services.udev.extraRules = ''
   SUBSYSTEM=="usb", ATTRS{idVendor}=="0001", ATTRS{idProduct}=="0000", MODE="0666"
 '';
 ```
+
+## Disclaimer
+
+This code was written by an LLM. No assurances are provided. Use at your own risk.
