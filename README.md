@@ -229,3 +229,7 @@ services.udev.extraRules = ''
 ## Disclaimer
 
 This code was written by an LLM. No assurances are provided. Use at your own risk.
+
+I am not affiliated with the GREENCELL.GLOBAL brand, I don't represent and I was
+never employed by CSG S.A. nor was I ever contracted by them for doing any work
+whatsoever.
