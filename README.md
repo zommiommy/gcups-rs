@@ -13,10 +13,17 @@ See [PROTOCOL.md](PROTOCOL.md) for the full wire-level documentation.
 
 ## CLI
 
-With no subcommand, `gcups` prints a full status report:
+With no subcommand, `gcups` prints a one-line status for scripting:
 
 ```
 $ gcups
+Power: MAINS  Battery: 100%  Load: 17%  Input: 228.2V  Output: 226.9V
+```
+
+Use `gcups status` for a full report:
+
+```
+$ gcups status
 Device
   Model:              2000VA
   Protocol:           MEC vMEC0003
@@ -57,7 +64,8 @@ Rated
 ### Commands
 
 ```
-$ gcups status              # default — full status report
+$ gcups                     # one-line status (for scripting)
+$ gcups status              # full status report
 $ gcups status --json       # full JSON output
 $ gcups nominal             # rated parameters
 $ gcups nominal --json
@@ -75,7 +83,7 @@ $ gcups cancel-shutdown     # cancel pending shutdown
 $ gcups wakeup              # restore power
 ```
 
-### Exit codes (`status` command)
+### Exit codes
 
 | Code | Condition                  |
 |------|----------------------------|

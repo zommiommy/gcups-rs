@@ -17,7 +17,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Read live UPS status (default when no subcommand given).
+    /// Full status report (device info, readings, flags, rated specs).
     Status {
         /// Output as JSON.
         #[arg(short, long)]
@@ -238,7 +238,6 @@ impl FullStatus {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let command = cli.command.unwrap_or(Command::Status { json: false });
 
     let ups = match gcups::Ups::open() {
         Ok(u) => u,
@@ -246,6 +245,25 @@ fn main() -> ExitCode {
             eprintln!("error: {e}");
             return ExitCode::from(10);
         }
+    };
+
+    // No subcommand: quick one-line status for scripting.
+    let Some(command) = cli.command else {
+        return match ups.status() {
+            Ok(status) => {
+                if let Some(json) = std::env::args().find(|a| a == "--json" || a == "-j") {
+                    let _ = json;
+                    println!("{}", serde_json::to_string_pretty(&status).unwrap());
+                } else {
+                    println!("{status}");
+                }
+                status_exit_code(&status)
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::from(10)
+            }
+        };
     };
 
     match run(ups, command) {
@@ -364,5 +382,17 @@ fn run(ups: gcups::Ups, command: Command) -> Result<ExitCode, gcups::Error> {
             println!("Wake-up sent.");
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+fn status_exit_code(s: &gcups::UpsStatus) -> ExitCode {
+    if s.ups_fault {
+        ExitCode::from(3)
+    } else if s.battery_low {
+        ExitCode::from(2)
+    } else if s.utility_fail {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
 }
