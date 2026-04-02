@@ -13,17 +13,51 @@ See [PROTOCOL.md](PROTOCOL.md) for the full wire-level documentation.
 
 ## CLI
 
-With no subcommand, `gcups` prints a one-line status summary:
+With no subcommand, `gcups` prints a full status report:
 
 ```
 $ gcups
-Power: MAINS  Battery: 100%  Load: 17%  Input: 228.2V  Output: 226.9V
+Device
+  Model:              2000VA
+  Protocol:           MEC vMEC0003
+  Topology:           line-interactive
+
+Mains
+  Input voltage:      228.2 V
+  Input frequency:    50.0 Hz
+  Fault voltage:      0.5 V
+
+Output
+  Output voltage:     226.9 V
+  Load:               17%
+  Temperature:        n/a
+
+Battery
+  Level:              100%
+  Voltage:            27.4 V
+  Pack:               2x 12 V (24 V nominal)
+  Low:                no
+
+Status
+  Power source:       mains
+  Utility fail:       no
+  UPS fault:          no
+  Bypass/boost:       no
+  Beeper:             yes
+  Shutdown active:    no
+  Test in progress:   no
+
+Rated
+  Input voltage:      230.0 V
+  Input current:      8 A
+  Input frequency:    50.0 Hz
+  Battery voltage:    24.0 V
 ```
 
 ### Commands
 
 ```
-$ gcups status              # default — live status summary
+$ gcups status              # default — full status report
 $ gcups status --json       # full JSON output
 $ gcups nominal             # rated parameters
 $ gcups nominal --json
