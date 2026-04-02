@@ -13,38 +13,35 @@ See [PROTOCOL.md](PROTOCOL.md) for the full wire-level documentation.
 
 ## CLI
 
+With no subcommand, `gcups` prints a one-line status summary:
+
 ```
 $ gcups
 Power: MAINS  Battery: 100%  Load: 17%  Input: 228.2V  Output: 226.9V
-
-$ gcups --json
-{
-  "input_voltage": 226.9,
-  "input_voltage_fault": 0.5,
-  "output_voltage": 226.9,
-  "load_percent": 17.0,
-  "input_frequency": 50.0,
-  "battery_voltage": 27.4,
-  "temperature": null,
-  "battery_level": 100,
-  "nominal": {
-    "input_voltage": 230.0,
-    "input_current": 8.0,
-    "battery_voltage": 24.0,
-    "input_frequency": 50.0
-  },
-  "beeper_on": true,
-  "shutdown_active": false,
-  "test_in_progress": false,
-  "offline": true,
-  "ups_fault": false,
-  "bypass_or_boost": false,
-  "battery_low": false,
-  "utility_fail": false
-}
 ```
 
-### Exit codes
+### Commands
+
+```
+$ gcups status              # default — live status summary
+$ gcups status --json       # full JSON output
+$ gcups nominal             # rated parameters
+$ gcups nominal --json
+$ gcups info                # model string (e.g. "2000VA")
+$ gcups protocol            # protocol identifier
+$ gcups protocol-version    # protocol version
+$ gcups raw 0x0d            # raw descriptor read by index
+$ gcups test-short          # start ~10 s battery self-test
+$ gcups test-long           # start ~10 min battery self-test
+$ gcups test-cancel         # cancel running test
+$ gcups beeper              # toggle beeper on/off
+$ gcups shutdown 60         # shutdown in 60 s (stays off)
+$ gcups shutdown-restore 60 # shutdown in 60 s, restore on mains return
+$ gcups cancel-shutdown     # cancel pending shutdown
+$ gcups wakeup              # restore power
+```
+
+### Exit codes (`status` command)
 
 | Code | Condition                  |
 |------|----------------------------|
@@ -54,10 +51,10 @@ $ gcups --json
 | 3    | UPS fault                  |
 | 10   | Device error               |
 
-Use the exit code in a script to trigger a safe shutdown:
+Use the exit code to trigger a safe shutdown:
 
 ```bash
-gcups --json
+gcups status --json
 case $? in
   1|2) sync && systemctl poweroff ;;
 esac
