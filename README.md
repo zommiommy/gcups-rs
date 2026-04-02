@@ -225,7 +225,3 @@ services.udev.extraRules = ''
   SUBSYSTEM=="usb", ATTRS{idVendor}=="0001", ATTRS{idProduct}=="0000", MODE="0666"
 '';
 ```
-
-## License
-
-MIT
