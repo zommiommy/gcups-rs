@@ -141,7 +141,6 @@ pub struct UpsStatus {
     pub nominal: NominalParams,
 
     // ── Status register flags (bit 0 → bit 7) ──────────────────────
-
     /// Beeper is currently active.
     pub beeper_on: bool,
     /// A shutdown sequence is in progress.
@@ -163,7 +162,11 @@ pub struct UpsStatus {
 
 impl fmt::Display for UpsStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let source = if self.utility_fail { "BATTERY" } else { "MAINS" };
+        let source = if self.utility_fail {
+            "BATTERY"
+        } else {
+            "MAINS"
+        };
         let low = if self.battery_low { " [LOW]" } else { "" };
         let fault = if self.ups_fault { " [FAULT]" } else { "" };
         write!(
@@ -299,10 +302,24 @@ impl Ups {
     }
 
     /// Read the full live status (combines nominal + current reports).
+    ///
+    /// Performs two USB transactions: one for the rated specs and one for
+    /// the live readings. When polling in a loop, prefer
+    /// [`current_status`](Self::current_status) with a cached
+    /// [`NominalParams`] to avoid re-reading the rated specs each tick.
     pub fn status(&self) -> Result<UpsStatus, Error> {
         let nominal = self.nominal_params()?;
+        self.current_status(&nominal)
+    }
+
+    /// Read live current parameters, parsed against a known nominal.
+    ///
+    /// Nominal parameters are the UPS's rated specs — they don't change
+    /// at runtime, so a monitoring loop should fetch them once and reuse
+    /// the reference. This performs exactly one USB transaction per call.
+    pub fn current_status(&self, nominal: &NominalParams) -> Result<UpsStatus, Error> {
         let raw = self.read_descriptor(report::CURRENT_PARAMS)?;
-        parse_current(&raw, nominal)
+        parse_current(&raw, nominal.clone())
     }
 
     // ── Commands ────────────────────────────────────────────────────
@@ -644,8 +661,8 @@ mod tests {
         // Real capture: report 0x0d → "#230.0 008 24.00 50.0\r"
         let raw: &[u8] = &[
             46, 3, // bLength=46, bDescriptorType=3
-            35, 0, 50, 0, 51, 0, 48, 0, 46, 0, 48, 0, 32, 0, 48, 0, 48, 0, 56, 0, 32, 0, 50, 0,
-            52, 0, 46, 0, 48, 0, 48, 0, 32, 0, 53, 0, 48, 0, 46, 0, 48, 0, 13, 0,
+            35, 0, 50, 0, 51, 0, 48, 0, 46, 0, 48, 0, 32, 0, 48, 0, 48, 0, 56, 0, 32, 0, 50, 0, 52,
+            0, 46, 0, 48, 0, 48, 0, 32, 0, 53, 0, 48, 0, 46, 0, 48, 0, 13, 0,
         ];
         let s = decode_string_descriptor(raw);
         assert_eq!(s, "#230.0 008 24.00 50.0\r");
