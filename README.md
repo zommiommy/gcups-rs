@@ -80,6 +80,9 @@ $ gcups beeper              # toggle beeper on/off
 $ gcups shutdown 60         # shutdown in 60 s (stays off)
 $ gcups shutdown-restore 60 # shutdown in 60 s, restore on mains return
 $ gcups cancel-shutdown     # cancel pending shutdown
+$ gcups watch              # continuous columnar polling (Ctrl-C to stop)
+$ gcups watch -i 200ms -d 30s --format csv > trace.csv
+$ gcups watch --changes-only --format json   # only emit when register bits flip
 $ gcups wakeup              # restore power
 ```
 

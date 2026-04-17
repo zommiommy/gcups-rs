@@ -79,7 +79,7 @@ Uses `clap` 4 with derive macros. Default subcommand (no args) is `status`.
 
 ### Subcommands
 
-`status [--json]`, `nominal [--json]`, `info`, `protocol`, `protocol-version`, `raw <index>`, `test-short`, `test-long`, `test-cancel`, `beeper`, `shutdown [delay]`, `shutdown-restore [delay]`, `cancel-shutdown`, `cancel-shutdown-restore`, `cancel-shutdown-return`, `wakeup`.
+`status [--json]`, `nominal [--json]`, `info`, `protocol`, `protocol-version`, `raw <index>`, `watch [-i INTERVAL] [-n COUNT] [-d DURATION] [--format human|json|csv] [--changes-only]`, `test-short`, `test-long`, `test-cancel`, `beeper`, `shutdown [delay]`, `shutdown-restore [delay]`, `cancel-shutdown`, `cancel-shutdown-restore`, `cancel-shutdown-return`, `wakeup`.
 
 ### Exit codes (status command only)
 
