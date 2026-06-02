@@ -1,14 +1,16 @@
 # gcups
 
-Rust driver and CLI for GreenCell UPS devices (MEC0003).
+Rust driver and CLI for GreenCell UPS devices using either the MEC0003
+descriptor transport or the Cypress HID Megatec/Q1 transport (`0665:5161`).
 
 Communicates over USB HID to read battery status, electrical parameters,
 and send commands (shutdown, self-test, beeper toggle, etc.). No Docker,
 no Electron, no proprietary runtime -- just a single static binary or a
 library you can embed.
 
-Protocol reverse-engineered from the official
-[gcups](https://github.com/fajfer/gcups) Electron app.
+The MEC0003 descriptor transport was reverse-engineered from the official
+[gcups](https://github.com/fajfer/gcups) Electron app. The Cypress transport
+uses the same Megatec/Q1 commands over HID reports.
 See [PROTOCOL.md](PROTOCOL.md) for the full wire-level documentation.
 
 ## CLI
@@ -65,6 +67,8 @@ Rated
 
 ```
 $ gcups                     # one-line status (for scripting)
+$ gcups list                # list supported UPS devices and selectors
+$ gcups --device 0665:5161@001:004 status
 $ gcups status              # full status report
 $ gcups status --json       # full JSON output
 $ gcups nominal             # rated parameters
@@ -72,7 +76,7 @@ $ gcups nominal --json
 $ gcups info                # model string (e.g. "2000VA")
 $ gcups protocol            # protocol identifier
 $ gcups protocol-version    # protocol version
-$ gcups raw 0x0d            # raw descriptor read by index
+$ gcups raw 0x0d            # raw report read by logical ID
 $ gcups test-short          # start ~10 s battery self-test
 $ gcups test-long           # start ~10 min battery self-test
 $ gcups test-cancel         # cancel running test
@@ -86,6 +90,39 @@ $ gcups watch --changes-only --format json   # only emit when register bits flip
 $ gcups wakeup              # restore power
 ```
 
+Without `--device`, auto-detection opens the UPS only when exactly one supported
+device is connected. If multiple supported UPSes are connected, run `gcups list`
+and pass the printed selector with `--device`. A `VID:PID` selector works only
+when one device of that type is present; two UPSes of the same type require the
+full `VID:PID@BUS:ADDR` selector.
+
+### Device selection
+
+`gcups list` prints supported devices in the selector format accepted by
+`--device`:
+
+```
+Selector               VID:PID   USB     Transport
+0001:0000@005:003      0001:0000 005:003 MEC0003 descriptor
+0665:5161@001:004      0665:5161 001:004 Cypress HID Megatec/Q1
+```
+
+Selector forms:
+
+| Form | Meaning |
+|------|---------|
+| `VID:PID` | Selects a device type; valid only when exactly one matching device is connected |
+| `VID:PID@BUS:ADDR` | Selects one physical USB device; required for two UPSes of the same type |
+
+Examples:
+
+```
+gcups --device 0665:5161 status
+gcups --device 0665:5161@001:004 status
+```
+
+`list` does not open or claim the UPS; it only enumerates supported USB devices.
+
 ### Exit codes
 
 | Code | Condition                  |
@@ -95,6 +132,9 @@ $ gcups wakeup              # restore power
 | 2    | Battery low                |
 | 3    | UPS fault                  |
 | 10   | Device error               |
+
+`gcups` (bare) and `gcups watch` use the same codes; `watch` reports its most
+recent sample's condition when it exits via `--count` or `--duration`.
 
 Use the exit code to trigger a safe shutdown:
 
@@ -125,6 +165,20 @@ if status.utility_fail {
 }
 ```
 
+### Selecting a device
+
+```rust
+let devices = gcups::Ups::list_devices()?;
+for device in &devices {
+    println!("{} {}", device.selector(), device.transport);
+}
+
+let selector = "0665:5161@001:004".parse().expect("valid selector");
+let ups = gcups::Ups::open_with_selector(selector)?;
+let status = ups.status()?;
+```
+
+
 ### Sending commands
 
 ```rust
@@ -150,9 +204,11 @@ ups.toggle_beeper()?;
 
 | Method                          | Description                              |
 |---------------------------------|------------------------------------------|
-| `Ups::open()`                   | Find and open the UPS                    |
-| `ups.status()`                  | Live readings and status flags           |
-| `ups.nominal_params()`          | Rated specifications                     |
+| `Ups::open()`                   | Auto-open when exactly one UPS is present |
+| `Ups::list_devices()`           | List supported connected UPS devices      |
+| `Ups::open_with_selector(sel)`  | Open a selected UPS                       |
+| `ups.status()`                  | Live readings and status flags            |
+| `ups.nominal_params()`          | Rated specifications                      |
 | `ups.device_info()`             | Model string (e.g. "2000VA")             |
 | `ups.protocol()`                | Protocol identifier                      |
 | `ups.protocol_version()`        | Protocol version                         |
@@ -166,7 +222,7 @@ ups.toggle_beeper()?;
 | `ups.cancel_shutdown_restore()` | Cancel shutdown-and-restore              |
 | `ups.cancel_shutdown_return()`  | Cancel shutdown-return                   |
 | `ups.wake_up()`                 | Restore power                            |
-| `ups.read_descriptor(index)`    | Raw low-level descriptor read            |
+| `ups.read_descriptor(index)`    | Raw low-level report read                |
 
 ## Installation
 
@@ -214,11 +270,12 @@ cargo build --release
 ## Permissions
 
 The UPS shows up as a HID device. By default only root can access it.
-Either run as root or add a udev rule:
+Either run as root or add udev rules for the supported transports:
 
 ```
 # /etc/udev/rules.d/99-gcups.rules
 SUBSYSTEM=="usb", ATTRS{idVendor}=="0001", ATTRS{idProduct}=="0000", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0665", ATTRS{idProduct}=="5161", MODE="0666"
 ```
 
 On NixOS:
@@ -226,6 +283,7 @@ On NixOS:
 ```nix
 services.udev.extraRules = ''
   SUBSYSTEM=="usb", ATTRS{idVendor}=="0001", ATTRS{idProduct}=="0000", MODE="0666"
+  SUBSYSTEM=="usb", ATTRS{idVendor}=="0665", ATTRS{idProduct}=="5161", MODE="0666"
 '';
 ```
 

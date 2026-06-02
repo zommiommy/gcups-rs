@@ -6,17 +6,24 @@ use serde::Serialize;
 
 /// GreenCell UPS monitor and control tool.
 ///
-/// Communicates with a GreenCell MEC0003 UPS over USB HID.
+/// Communicates with supported GreenCell UPS USB transports.
 /// Requires root or appropriate udev rules for device access.
 #[derive(Parser)]
 #[command(version, about)]
 struct Cli {
+    /// Select a UPS; use `gcups list` to see copy-pasteable selectors.
+    #[arg(long, global = true, value_name = "VID:PID[@BUS:ADDR]", value_parser = parse_device_selector)]
+    device: Option<gcups::DeviceSelector>,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// List supported UPS devices connected over USB.
+    List,
+
     /// Full status report (device info, readings, flags, rated specs).
     Status {
         /// Output as JSON.
@@ -67,9 +74,9 @@ enum Command {
     /// Read protocol version.
     ProtocolVersion,
 
-    /// Read a raw USB string descriptor by index.
+    /// Read a raw report by descriptor index / logical report ID.
     Raw {
-        /// Descriptor index (decimal or 0x-prefixed hex).
+        /// Descriptor index or logical report ID (decimal or 0x-prefixed hex).
         #[arg(value_parser = parse_u8)]
         index: u8,
     },
@@ -121,6 +128,10 @@ fn parse_u8(s: &str) -> Result<u8, String> {
     }
 }
 
+fn parse_device_selector(s: &str) -> Result<gcups::DeviceSelector, String> {
+    s.parse()
+}
+
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum WatchFormat {
     /// Human-readable columnar output with change highlighting.
@@ -146,9 +157,6 @@ fn parse_duration_arg(s: &str) -> Result<Duration, String> {
     let value: f64 = num_part
         .parse()
         .map_err(|e| format!("invalid number {num_part:?}: {e}"))?;
-    if !value.is_finite() || value < 0.0 {
-        return Err("duration must be finite and non-negative".into());
-    }
     let seconds = match unit {
         "" | "s" => value,
         "ms" => value / 1000.0,
@@ -156,7 +164,10 @@ fn parse_duration_arg(s: &str) -> Result<Duration, String> {
         "h" => value * 3600.0,
         other => return Err(format!("unknown unit {other:?} (expected ms, s, m, h)")),
     };
-    Ok(Duration::from_secs_f64(seconds))
+    // try_from_secs_f64 rejects negative, non-finite, and overflowing values
+    // (e.g. an absurdly large digit string) with an error instead of panicking
+    // like from_secs_f64.
+    Duration::try_from_secs_f64(seconds).map_err(|e| format!("invalid duration {s:?}: {e}"))
 }
 
 // ── Full status (combines every query the UPS supports) ─────────────────────
@@ -243,15 +254,7 @@ impl FullStatus {
     }
 
     fn exit_code(&self) -> ExitCode {
-        if self.ups_fault {
-            ExitCode::from(3)
-        } else if self.battery_low {
-            ExitCode::from(2)
-        } else if self.utility_fail {
-            ExitCode::from(1)
-        } else {
-            ExitCode::SUCCESS
-        }
+        condition_exit_code(self.ups_fault, self.battery_low, self.utility_fail)
     }
 
     fn print_human(&self) {
@@ -321,7 +324,11 @@ impl FullStatus {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    let ups = match gcups::Ups::open() {
+    if matches!(&cli.command, Some(Command::List)) {
+        return run_list();
+    }
+
+    let ups = match open_ups(cli.device) {
         Ok(u) => u,
         Err(e) => {
             eprintln!("error: {e}");
@@ -333,13 +340,8 @@ fn main() -> ExitCode {
     let Some(command) = cli.command else {
         return match ups.status() {
             Ok(status) => {
-                if let Some(json) = std::env::args().find(|a| a == "--json" || a == "-j") {
-                    let _ = json;
-                    println!("{}", serde_json::to_string_pretty(&status).unwrap());
-                } else {
-                    println!("{status}");
-                }
-                status_exit_code(&status)
+                println!("{status}");
+                condition_exit_code(status.ups_fault, status.battery_low, status.utility_fail)
             }
             Err(e) => {
                 eprintln!("error: {e}");
@@ -357,8 +359,46 @@ fn main() -> ExitCode {
     }
 }
 
+fn open_ups(selector: Option<gcups::DeviceSelector>) -> Result<gcups::Ups, gcups::Error> {
+    match selector {
+        Some(selector) => gcups::Ups::open_with_selector(selector),
+        None => gcups::Ups::open(),
+    }
+}
+
+fn run_list() -> ExitCode {
+    match gcups::Ups::list_devices() {
+        Ok(devices) => {
+            if devices.is_empty() {
+                println!("No supported UPS devices connected.");
+                return ExitCode::SUCCESS;
+            }
+
+            println!("{:<22} {:<9} {:<7} Transport", "Selector", "VID:PID", "USB");
+            for device in devices {
+                println!(
+                    "{:<22} {:04x}:{:04x} {:03}:{:03} {}",
+                    device.selector(),
+                    device.vid,
+                    device.pid,
+                    device.bus,
+                    device.address,
+                    device.transport,
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(10)
+        }
+    }
+}
+
 fn run(ups: gcups::Ups, command: Command) -> Result<ExitCode, gcups::Error> {
     match command {
+        Command::List => unreachable!("handled before opening"),
+
         Command::Status { json } => {
             let full = FullStatus::gather(&ups)?;
             if json {
@@ -501,13 +541,23 @@ fn run_watch(
     let start = Instant::now();
     let mut prev_reg: Option<u8> = None;
     let mut polled: usize = 0;
+    // Exit code mirrors the most recent sample's condition (like `status`), so a
+    // bounded `--count` / `--duration` watch can be used as a one-shot probe.
+    let mut last_exit = ExitCode::SUCCESS;
+    // A healthy device never errors repeatedly; bail out so a mid-watch
+    // disconnect can't spin forever (e.g. when `--count` is set).
+    const MAX_CONSECUTIVE_ERRORS: usize = 5;
+    let mut consecutive_errors: usize = 0;
 
     loop {
         let tick = Instant::now();
 
         match ups.current_status(&nominal) {
             Ok(status) => {
+                consecutive_errors = 0;
                 polled += 1;
+                last_exit =
+                    condition_exit_code(status.ups_fault, status.battery_low, status.utility_fail);
                 let reg = register_byte(&status);
                 let changed = prev_reg.is_some_and(|p| p != reg);
                 let first = prev_reg.is_none();
@@ -528,7 +578,13 @@ fn run_watch(
                 }
                 prev_reg = Some(reg);
             }
-            Err(e) => eprintln!("warning: sample failed: {e}"),
+            Err(e) => {
+                consecutive_errors += 1;
+                eprintln!("warning: sample failed: {e}");
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    return Err(e);
+                }
+            }
         }
 
         if count.is_some_and(|n| polled >= n) {
@@ -544,7 +600,7 @@ fn run_watch(
         }
     }
 
-    Ok(ExitCode::SUCCESS)
+    Ok(last_exit)
 }
 
 /// Reconstruct the raw 8-bit status register from the parsed flags.
@@ -701,12 +757,13 @@ fn print_watch_row_json(t: f64, ts: f64, s: &gcups::UpsStatus, reg: u8) {
     println!("{}", serde_json::to_string(&sample).unwrap());
 }
 
-fn status_exit_code(s: &gcups::UpsStatus) -> ExitCode {
-    if s.ups_fault {
+/// Map UPS condition flags to a status exit code (fault > low battery > on-battery).
+fn condition_exit_code(ups_fault: bool, battery_low: bool, utility_fail: bool) -> ExitCode {
+    if ups_fault {
         ExitCode::from(3)
-    } else if s.battery_low {
+    } else if battery_low {
         ExitCode::from(2)
-    } else if s.utility_fail {
+    } else if utility_fail {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
@@ -758,6 +815,14 @@ mod tests {
         assert!(parse_duration_arg("10x").is_err());
         assert!(parse_duration_arg("-1s").is_err());
         assert!(parse_duration_arg("inf").is_err());
+    }
+
+    #[test]
+    fn duration_rejects_out_of_range() {
+        // Finite but larger than Duration can hold: must error, not panic.
+        assert!(parse_duration_arg("99999999999999999999").is_err());
+        // Overflow via the unit multiplier (value is finite, value*3600 is not).
+        assert!(parse_duration_arg("1000000000000000000h").is_err());
     }
 
     #[test]

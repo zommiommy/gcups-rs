@@ -1,29 +1,27 @@
-# MEC0003 USB HID Protocol
+# GreenCell UPS USB Protocols
 
-Protocol documentation for the GreenCell UPS (MEC0003) USB interface.
-Reverse-engineered from the [gcups](https://github.com/fajfer/gcups) Electron app (v1.1.7).
+Protocol documentation for GreenCell UPS USB interfaces supported by this
+project. The application protocol is Megatec/Q1; supported devices differ
+mainly in how those commands are transported over USB.
 
-## Device identification
+## Supported device transports
 
-| Field        | Value                    |
-|--------------|--------------------------|
-| Vendor ID    | `0x0001` (Fry's Electronics) |
-| Product ID   | `0x0000` (MEC0003)       |
-| Manufacturer | MEC                      |
-| Vendor       | GreenCell S.A.           |
-| USB class    | HID (Human Interface Device) |
-| Speed        | Low Speed (1 Mbps)       |
-| Endpoint     | EP 1 IN, Interrupt, 8 bytes, interval 10 ms |
+| Transport | Vendor ID | Product ID | USB behavior |
+|-----------|-----------|------------|--------------|
+| MEC0003 descriptor | `0x0001` | `0x0000` | String descriptor indices act as commands |
+| Cypress HID Megatec/Q1 | `0x0665` | `0x5161` | ASCII Megatec commands over HID reports |
 
-## Transport
+Two USB transports are supported:
 
-The UPS abuses the standard USB **GET_DESCRIPTOR** request to carry
-both queries and commands. Each "report" is a USB string descriptor
-at a specific index. The host reads a descriptor; the device either
-returns data (for queries) or performs a side effect and returns an
-acknowledgement (for commands).
+- **MEC0003 descriptor transport**: the UPS abuses standard USB
+  `GET_DESCRIPTOR(STRING)` requests. Each "report" is a USB string descriptor
+  at a specific index. Reading a descriptor either returns data or performs a
+  side effect and returns an acknowledgement.
+- **Cypress HID Megatec/Q1 transport**: the UPS receives normal Megatec ASCII
+  commands (`Q1\r`, `F\r`, `I\r`, `T\r`, etc.) through HID output reports and
+  returns ASCII replies through interrupt IN packets.
 
-### Control transfer parameters
+### MEC0003 control transfer parameters
 
 | Field          | Value                              |
 |----------------|------------------------------------|
@@ -37,9 +35,23 @@ The `0x03` in wValue's high byte is the USB descriptor type for STRING.
 The low byte is the string descriptor index, which the UPS firmware
 interprets as an instruction opcode.
 
+### Cypress HID transfer parameters
+
+For `0665:5161`, commands are sent as 8-byte zero-padded HID output reports:
+
+| Field          | Value                              |
+|----------------|------------------------------------|
+| bmRequestType  | `0x21` (OUT, Class, Interface)     |
+| bRequest       | `0x09` (SET_REPORT)                |
+| wValue         | `0x0200` (Output report, ID 0)     |
+| wIndex         | `0x0000` (interface 0)             |
+| packet size    | 8 bytes                            |
+
+Replies are read from interrupt endpoint `0x81` in 8-byte chunks until `\r`.
+
 ### Response format
 
-Responses are standard USB string descriptors (UTF-16LE with a 2-byte
+MEC0003 responses are standard USB string descriptors (UTF-16LE with a 2-byte
 header):
 
 ```
@@ -48,41 +60,49 @@ Byte 1: bDescriptorType (always 0x03)
 Byte 2+: UTF-16LE payload
 ```
 
-To decode: skip the 2-byte header, take the low byte of each UTF-16LE
-code unit, discard null bytes. The result is an ASCII string.
+To decode: skip the 2-byte header, take the low byte of each UTF-16LE code unit,
+discard null bytes. The result is an ASCII string.
+
+Cypress responses are already ASCII bytes split across 8-byte interrupt packets.
 
 ### Command acknowledgement
 
-Commands return the string `UPS No Ack` on success. Any other response
-(including valid data) indicates the command was not understood.
+MEC0003 descriptor commands return the string `UPS No Ack` on success. Any
+other response indicates the command was not understood.
 
-## Report IDs (instruction opcodes)
+Cypress/Megatec commands often return no reply on success. If they do return a
+reply, `ACK` or `(ACK` indicates success; an echoed command indicates failure.
+
+## Logical reports and commands
+
+The Rust API uses the following logical report IDs. On MEC0003, these are USB
+string descriptor indices. On Cypress HID, supported entries map to Megatec
+ASCII commands.
 
 ### Queries
 
-| Mnemonic | Report ID | Description              |
-|----------|-----------|--------------------------|
-| -        | `0x01`    | Protocol identifier      |
-| -        | `0x02`    | Protocol version         |
-| Q1       | `0x03`    | Current (live) parameters |
-| I        | `0x0c`    | Device info string       |
-| F        | `0x0d`    | Nominal (rated) parameters |
+| Mnemonic | Logical ID | Cypress command | Description              |
+|----------|------------|-----------------|--------------------------|
+| -        | `0x01`     | unsupported     | MEC protocol identifier  |
+| -        | `0x02`     | unsupported     | MEC protocol version     |
+| Q1       | `0x03`     | `Q1\r`          | Current (live) parameters |
+| I        | `0x0c`     | `I\r`           | Device info string       |
+| F        | `0x0d`     | `F\r`           | Nominal (rated) parameters |
 
 ### Commands
 
-| Mnemonic | Report ID   | Description                   |
-|----------|-------------|-------------------------------|
-| T        | `0x04`      | Start short self-test (~10 s) |
-| TL       | `0x05`      | Start long self-test (~10 min) |
-| Q        | `0x07`      | Toggle beeper on/off          |
-| S        | `0x08`      | Shutdown (base opcode)        |
-| C        | `0x0a`      | Cancel shutdown / wake up     |
-| CT       | `0x0b`      | Cancel self-test              |
-| SR       | `0x10`      | Shutdown with restore (base)  |
-| CSR      | `0x1a`      | Cancel shutdown-and-restore   |
-| R        | `0x24`      | Reset                         |
-| CS       | `0x2a`      | Cancel shutdown-return        |
-| *        | see table   | Timed shutdown variants       |
+| Mnemonic | Logical ID | Cypress command | Description                   |
+|----------|------------|-----------------|-------------------------------|
+| T        | `0x04`     | `T\r`           | Start short self-test (~10 s) |
+| TL       | `0x05`     | `TL\r`          | Start long self-test (~10 min) |
+| Q        | `0x07`     | `Q\r`           | Toggle beeper on/off          |
+| S        | `0x08`     | generated       | Shutdown                      |
+| C        | `0x0a`     | `C\r`           | Cancel shutdown / wake up     |
+| CT       | `0x0b`     | `CT\r`          | Cancel self-test              |
+| SR       | `0x10`     | generated       | Shutdown with restore         |
+| CSR      | `0x1a`     | `C\r`           | Cancel shutdown-and-restore   |
+| CS       | `0x2a`     | `C\r`           | Cancel shutdown-return        |
+| *        | see table  | generated       | Timed shutdown variants       |
 
 ## Nominal parameters (report F, `0x0d`)
 
@@ -196,9 +216,14 @@ Trim whitespace and the leading `#` to extract the model designation.
 
 ## Shutdown delay mapping
 
-The protocol supports a fixed set of shutdown delays. Each delay has
-two report IDs: one for "shutdown and stay off" and one for "shutdown
-then restore power when mains returns."
+Shutdown delay encoding is transport-specific. Both transports select the
+greatest supported delay that does not exceed the requested duration.
+
+### MEC0003 descriptor delay mapping
+
+MEC0003 uses fixed report IDs. Each delay has two report IDs: one for
+"shutdown and stay off" and one for "shutdown then restore power when mains
+returns."
 
 | Delay   | Shutdown report | Restore report |
 |---------|-----------------|----------------|
@@ -220,8 +245,26 @@ then restore power when mains returns."
 The report ID encodes the delay in its upper nibble. The lower nibble
 distinguishes shutdown (`0x_8`) from shutdown-with-restore (`0x_0`).
 
-To request an arbitrary delay, select the greatest supported value
-that does not exceed the desired duration.
+### Cypress/Megatec delay mapping
+
+Cypress HID devices use standard Megatec shutdown commands. `<n>` selects the
+quantized delay from the grid below:
+
+| Delay range | `<n>` value                     |
+|-------------|---------------------------------|
+| 12-54 s     | `.2`-`.9` (tenths of a minute)  |
+| 1-10 min    | `01`-`10` (whole minutes)       |
+
+The Megatec `S` command has two relevant forms, mapped to the two public methods:
+
+- `shutdown_and_restore(delay)` emits the bare `S<n>\r` form. Per the Megatec
+  spec the UPS turns its output off after `<n>`, then reconnects ~10 s after
+  utility power is recovered - i.e. it restores on mains return.
+- `shutdown(delay)` emits the `S<n>R0000\r` form. Because the bare `S<n>` form
+  always returns on mains, there is no standard "stay off" command; `R0000`
+  ("never restore") is the convention NUT's `blazer`/`nutdrv_qx` drivers use for
+  `shutdown.stayoff`. Some firmware ignores `R0000` and restarts anyway - a
+  transport limitation, not a driver bug.
 
 ## Known device models
 
@@ -242,9 +285,10 @@ current. Known configurations:
 | UPS14      | Rack Tower   | 48 V    | 10 A    | 4x 12 V   | Online           |
 | UPS15      | Rack Tower   | 72 V    | 13 A    | 6x 12 V   | Online           |
 
-## USB descriptor dump (reference)
+## MEC0003 USB descriptor dump (reference)
 
-Captured from a GreenCell 2000VA line-interactive UPS.
+Captured from a GreenCell 2000VA line-interactive UPS using the MEC0003
+descriptor transport.
 
 ### Report F (nominal, index 0x0d)
 

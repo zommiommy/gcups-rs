@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Rust library and CLI for communicating with GreenCell UPS devices (MEC0003) over USB HID. The UPS protocol was reverse-engineered from the proprietary [gcups](https://github.com/fajfer/gcups) Electron app (v1.1.7). The device abuses standard USB `GET_DESCRIPTOR(STRING)` requests as a command/query transport — reading a string descriptor at a specific index either returns telemetry data or triggers an action on the UPS.
+Rust library and CLI for communicating with GreenCell UPS devices over USB HID. Two transports are supported: MEC0003 descriptor transport (`0001:0000`) reverse-engineered from the proprietary [gcups](https://github.com/fajfer/gcups) Electron app (v1.1.7), and Cypress HID Megatec/Q1 transport (`0665:5161`) used by other GreenCell UPS models. MEC0003 abuses standard USB `GET_DESCRIPTOR(STRING)` requests as a command/query transport. Cypress devices use ASCII Megatec/Q1 commands over HID output reports and interrupt reads.
 
 The project has two targets: a reusable library (`gcups`) and a multi-command CLI binary (`gcups`).
 
@@ -10,52 +10,72 @@ The project has two targets: a reusable library (`gcups`) and a multi-command CL
 
 ```
 src/
-  lib.rs   — Library: USB transport, protocol parsing, public API, tests
-  bin.rs   — CLI: clap subcommands, output formatting, exit codes
+  lib.rs      — Crate docs, module declarations, public re-exports
+  device.rs   — Device selectors, supported VID/PID table, transport enum
+  error.rs    — Public Error enum
+  parse.rs    — Megatec response parsing and battery-level calculation
+  shutdown.rs — Descriptor and Megatec shutdown delay encoders
+  status.rs   — NominalParams and UpsStatus public data types
+  ups.rs      — Device enumeration/opening and USB transport I/O
+  wire.rs     — USB constants, logical report IDs, Cypress command map, decoders
+  bin.rs      — CLI: clap subcommands, output formatting, exit codes, CLI helper tests
+tests/
+  public_api.rs — Integration tests for public API behavior
 ```
-
-**There are no other source files.** Everything lives in these two files. The library is self-contained with no internal module hierarchy.
 
 ### Data flow
 
-1. `Ups::open()` finds the USB device (VID=`0x0001`, PID=`0x0000`) via `rusb`, detaches the kernel HID driver, and returns a handle.
-2. `Ups::read_descriptor(index)` sends a `GET_DESCRIPTOR(STRING, index)` control transfer, receives a UTF-16LE string descriptor, decodes it to ASCII.
-3. Query methods (`status()`, `nominal_params()`, `device_info()`) call `read_descriptor` with the appropriate report ID, then parse the ASCII response.
-4. Command methods (`short_test()`, `shutdown()`, etc.) call `read_descriptor` and verify the response is `"UPS No Ack"` (the device's success acknowledgement).
-5. `UpsStatus` is computed by combining two reports: nominal (F, `0x0d`) and current (Q1, `0x03`), with battery voltage adjustment based on UPS topology and battery level calculation from voltage thresholds.
+1. `Ups::open()` enumerates supported USB devices via `rusb` and auto-opens only when exactly one supported UPS is attached.
+2. `Ups::list_devices()` returns visible supported devices with VID/PID, USB bus/address, transport, and copy-pasteable selectors. `Ups::open_with_selector(DeviceSelector)` opens a selected `VID:PID` or `VID:PID@BUS:ADDR`.
+3. MEC0003 I/O sends `GET_DESCRIPTOR(STRING, index)`, receives a UTF-16LE string descriptor, and decodes it to ASCII.
+4. Cypress HID I/O sends ASCII Megatec commands (`Q1\r`, `F\r`, `I\r`, etc.) in 8-byte zero-padded HID output reports and reads ASCII replies from interrupt endpoint `0x81`.
+5. Query methods (`status()`, `nominal_params()`, `device_info()`) call `read_descriptor` with the logical report ID, then parse the ASCII response.
+6. Command methods (`short_test()`, `shutdown()`, etc.) dispatch through the active transport and validate that transport's acknowledgement convention.
+7. `UpsStatus` is computed by combining two reports: nominal (F, `0x0d`) and current (Q1, `0x03`), with battery voltage adjustment based on UPS topology and battery level calculation from voltage thresholds.
 
-### Key constants (lib.rs)
+### Key constants (wire.rs)
 
 | Constant | Value | Purpose |
 |---|---|---|
-| `VID` / `PID` | `0x0001` / `0x0000` | USB device identification |
-| `BM_REQUEST_TYPE` | `0x80` | IN \| Standard \| Device |
-| `B_REQUEST` | `0x06` | GET_DESCRIPTOR |
-| `DESC_TYPE_STRING` | `0x0300` | String descriptor type in wValue |
-| `BUF_SIZE` | 96 | Max descriptor payload |
-| `ACK_RESPONSE` | `"UPS No Ack"` | Command success response |
-| `BATTERY_V_LOW_FACTOR` | 0.915 | Low threshold multiplier |
-| `BATTERY_V_HIGH_FACTOR` | 1.05 | High threshold multiplier |
+| `MEC_VID` / `MEC_PID` | `0x0001` / `0x0000` | MEC0003 descriptor device identification |
+| `CYPRESS_VID` / `CYPRESS_PID` | `0x0665` / `0x5161` | Cypress HID Megatec/Q1 device identification |
+| `BM_REQUEST_TYPE` | `0x80` | MEC IN \| Standard \| Device |
+| `B_REQUEST` | `0x06` | MEC GET_DESCRIPTOR |
+| `DESC_TYPE_STRING` | `0x0300` | MEC string descriptor type in wValue |
+| `CYPRESS_SET_REPORT_REQUEST_TYPE` | `0x21` | Cypress OUT \| Class \| Interface |
+| `CYPRESS_SET_REPORT` | `0x09` | Cypress SET_REPORT |
+| `CYPRESS_OUTPUT_REPORT` | `0x0200` | Cypress output report, report ID 0 |
+| `CYPRESS_INTERRUPT_IN` | `0x81` | Cypress interrupt IN endpoint |
+| `BUF_SIZE` | 96 | Max response payload |
+| `ACK_RESPONSE` | `"UPS No Ack"` | MEC command success response |
+| `BATTERY_V_LOW_FACTOR` | 0.915 | Low threshold multiplier (parse.rs) |
+| `BATTERY_V_HIGH_FACTOR` | 1.05 | High threshold multiplier (parse.rs) |
 
-### Report IDs (instruction opcodes)
+### Logical report IDs / instruction opcodes
 
-Defined in `mod report` inside `lib.rs`. Queries: `PROTOCOL` (`0x01`), `PROTOCOL_VERSION` (`0x02`), `CURRENT_PARAMS` (`0x03`), `INFO` (`0x0c`), `NOMINAL_PARAMS` (`0x0d`). Commands: `SHORT_TEST` (`0x04`), `LONG_TEST` (`0x05`), `BEEPER_TOGGLE` (`0x07`), `CANCEL_SHUTDOWN` (`0x0a`), `CANCEL_TEST` (`0x0b`), `CANCEL_SHUTDOWN_RESTORE` (`0x1a`), `CANCEL_SHUTDOWN_RETURN` (`0x2a`). Shutdown delays use dynamically computed report IDs from `ShutdownDelay::TABLE`.
+Defined in `mod report` inside `wire.rs`. Queries: `PROTOCOL` (`0x01`, MEC-only), `PROTOCOL_VERSION` (`0x02`, MEC-only), `CURRENT_PARAMS` (`0x03` / `Q1\r`), `INFO` (`0x0c` / `I\r`), `NOMINAL_PARAMS` (`0x0d` / `F\r`). Commands: `SHORT_TEST` (`0x04` / `T\r`), `LONG_TEST` (`0x05` / `TL\r`), `BEEPER_TOGGLE` (`0x07` / `Q\r`), `SHUTDOWN` (`0x08` / generated Megatec shutdown), `CANCEL_SHUTDOWN` (`0x0a` / `C\r`), `CANCEL_TEST` (`0x0b` / `CT\r`), `SHUTDOWN_RESTORE` (`0x10` / generated Megatec shutdown-restore), `CANCEL_SHUTDOWN_RESTORE` (`0x1a` / `C\r`), `CANCEL_SHUTDOWN_RETURN` (`0x2a` / `C\r`). MEC shutdown delays use `DescriptorShutdownDelay::TABLE`; Cypress shutdown delays use `MegatecShutdownDelay::TABLE`.
 
 ## Public API (lib.rs)
 
 ### Types
 
 - **`Ups`** — Handle to an open device. Owns a `rusb::DeviceHandle<Context>`.
+- **`DeviceInfo`** — Supported connected USB device: VID/PID, bus/address, transport, selector.
+- **`DeviceSelector`** — User selector parsed from `VID:PID` or `VID:PID@BUS:ADDR`.
+- **`DeviceLocation`** — USB bus/address pair; the optional physical-location part of a `DeviceSelector`.
+- **`UpsTransport`** — Supported transport enum: descriptor or Cypress HID.
 - **`UpsStatus`** — Live readings: 7 electrical fields, `battery_level` (u8), embedded `NominalParams`, 8 status flags. Implements `Display` (one-liner) and `Serialize`.
 - **`NominalParams`** — Rated specs: `input_voltage`, `input_current`, `battery_voltage`, `input_frequency`. All `f64`.
-- **`ShutdownDelay`** — Quantized delay with `from_duration(Duration)` lookup. 14 supported steps from 30 s to 9 min.
-- **`Error`** — `thiserror` enum: `DeviceNotFound`, `Usb(rusb::Error)`, `NotAcknowledged`, `ResponseTooShort`, `Parse`.
+- **`ShutdownDelay`** — Transport-specific quantized delay returned by shutdown methods.
+- **`Error`** — `thiserror` enum: includes device-not-found/ambiguous selector errors, USB errors, acknowledgement errors, short responses/writes, unsupported reports, and parse errors.
 
 ### Methods on `Ups`
 
 | Method | Report | Returns |
 |---|---|---|
-| `open()` | — | `Result<Ups, Error>` |
+| `open()` | — | `Result<Ups, Error>`; auto-opens only when exactly one supported UPS is connected |
+| `list_devices()` | — | `Result<Vec<DeviceInfo>, Error>` |
+| `open_with_selector(DeviceSelector)` | — | `Result<Ups, Error>` |
 | `status()` | F + Q1 | `Result<UpsStatus, Error>` |
 | `nominal_params()` | F | `Result<NominalParams, Error>` |
 | `device_info()` | I | `Result<String, Error>` |
@@ -75,13 +95,13 @@ Defined in `mod report` inside `lib.rs`. Queries: `PROTOCOL` (`0x01`), `PROTOCOL
 
 ## CLI (bin.rs)
 
-Uses `clap` 4 with derive macros. Default subcommand (no args) is `status`.
+Uses `clap` 4 with derive macros. No subcommand prints quick one-line status; `status` prints the full report.
 
 ### Subcommands
 
-`status [--json]`, `nominal [--json]`, `info`, `protocol`, `protocol-version`, `raw <index>`, `watch [-i INTERVAL] [-n COUNT] [-d DURATION] [--format human|json|csv] [--changes-only]`, `test-short`, `test-long`, `test-cancel`, `beeper`, `shutdown [delay]`, `shutdown-restore [delay]`, `cancel-shutdown`, `cancel-shutdown-restore`, `cancel-shutdown-return`, `wakeup`.
+`list`, `status [--json]`, `nominal [--json]`, `info`, `protocol`, `protocol-version`, `raw <index>`, `watch [-i INTERVAL] [-n COUNT] [-d DURATION] [--format human|json|csv] [--changes-only]`, `test-short`, `test-long`, `test-cancel`, `beeper`, `shutdown [delay]`, `shutdown-restore [delay]`, `cancel-shutdown`, `cancel-shutdown-restore`, `cancel-shutdown-return`, `wakeup`. Global option: `--device VID:PID[@BUS:ADDR]`.
 
-### Exit codes (status command only)
+### Exit codes (status, watch, and the bare one-liner)
 
 | Code | Meaning |
 |---|---|
@@ -106,7 +126,7 @@ nix-shell -p pkg-config libusb1 --run 'cargo build --release'
 # Build (debug)
 nix-shell -p pkg-config libusb1 --run 'cargo build'
 
-# Run tests (no hardware needed — all tests are parsing/logic)
+# Run tests (no hardware needed — tests cover parsing, selection, and logic)
 nix-shell -p pkg-config libusb1 --run 'cargo test'
 
 # Run against live UPS (requires root or udev rule)
@@ -120,10 +140,11 @@ On Debian/Ubuntu: `sudo apt install libusb-1.0-0-dev pkg-config` instead of `nix
 
 ### Error handling
 
-- Library uses `thiserror` with a single `Error` enum. Every variant carries context (`report_id`, `detail`, `len`).
+- Library uses `thiserror` with a single `Error` enum. Variants carry context (`selector`, `count`, `report_id`, `detail`, `len`).
 - `rusb::Error` is wrapped via `#[from]`.
 - Parse errors include the report ID and a human-readable detail string with the raw value that failed.
-- Commands validate the `"UPS No Ack"` response; any other response is `Error::NotAcknowledged`.
+- MEC commands validate the `"UPS No Ack"` response; Cypress commands accept no response, `ACK`, or `(ACK` as success.
+- Auto-detection returns an ambiguity error when more than one supported UPS is connected; callers should list devices and pass a selector.
 - The binary maps all `Error` variants to stderr output and exit code 10.
 
 ### Naming
@@ -136,10 +157,11 @@ On Debian/Ubuntu: `sudo apt install libusb-1.0-0-dev pkg-config` instead of `nix
 
 ### Patterns
 
-- **All USB I/O goes through `read_descriptor()`** — both queries and commands use the same transport. Commands just check the response string.
+- **All USB I/O goes through the active transport path behind `Ups::read_descriptor()` / command helpers** — query parsing is shared across transports.
+- **Device selection is explicit when ambiguous**: auto-open is only for one supported UPS; `VID:PID@BUS:ADDR` selects a physical device when multiple UPSes share a VID/PID.
 - **Parsing is prefix-then-split**: strip the leading character (`#` or `(`), split on whitespace, parse each field with contextual errors.
 - **Battery voltage adjustment**: online UPS (bit 3 = 0) divides reported voltage by `ONLINE_PARALLEL_DIVISOR` (2.0) and multiplies by nominal voltage. Offline/line-interactive (bit 3 = 1) uses the raw value.
-- **ShutdownDelay lookup**: `from_duration()` iterates a const table ascending, returning the greatest entry ≤ requested duration.
+- **Shutdown delay lookup**: descriptor and Cypress transports have separate const delay tables; both select the greatest entry ≤ requested duration.
 - **Fallible info queries in bin.rs**: `device_info()`, `protocol()`, `protocol_version()` use `unwrap_or_else` with `"unknown"` fallback so a partial failure doesn't prevent status output.
 
 ### Serialization
@@ -150,40 +172,47 @@ On Debian/Ubuntu: `sudo apt install libusb-1.0-0-dev pkg-config` instead of `nix
 
 ## Testing
 
-All tests are in `lib.rs` under `#[cfg(test)] mod tests`. No external test files.
+Private parser/transport-helper tests live alongside their modules
+(`parse.rs`, `wire.rs`, `device.rs`, `ups.rs`, `shutdown.rs`); CLI helper tests
+remain in `bin.rs`. Public API tests live in `tests/public_api.rs`.
 
-**8 unit tests + 1 doctest:**
+Library unit tests cover nominal/current parsing, battery level calculation,
+descriptor decoding, Cypress ASCII decoding, supported device IDs, private
+selector ambiguity, Cypress command mapping, and Cypress shutdown delay
+encoding. Integration tests cover public selector parsing, public device
+selectors, transport display strings, and public shutdown delay lookup. CLI
+tests cover duration parsing, status-register reconstruction, and watch
+bit-diff formatting.
 
-| Test | What it covers |
-|---|---|
-| `parse_nominal_typical` | Happy-path nominal parsing |
-| `parse_nominal_missing_prefix` | Missing `#` prefix → error |
-| `parse_current_mains_present` | Full Q1 parse, mains on, line-interactive |
-| `parse_current_on_battery` | Q1 parse with utility_fail set |
-| `parse_current_online_ups` | Online topology voltage adjustment |
-| `battery_level_boundaries` | Clamping at 0% and 100%, midpoint |
-| `shutdown_delay_lookup` | Duration quantization, below-minimum clamp |
-| `string_descriptor_decode` | Real captured bytes → ASCII |
-| doctest (`lib.rs` line 12) | Compile-check for the quick-start example |
-
-Tests do not require hardware — they exercise parsing and computation logic only. Run with `cargo test`.
+Tests do not require hardware — they exercise parsing, selection, and
+computation logic only. Run with `cargo test`.
 
 ## Important Files
 
 | Path | Purpose |
 |---|---|
-| `src/lib.rs` | Library: types, USB transport, parsing, API, tests |
-| `src/bin.rs` | CLI: clap commands, formatting, exit codes |
+| `src/lib.rs` | Crate docs, module declarations, public re-exports |
+| `src/device.rs` | Device selectors, supported VID/PID table, transport enum |
+| `src/error.rs` | Public `Error` enum |
+| `src/parse.rs` | Megatec response parsing and battery-level calculation |
+| `src/shutdown.rs` | Descriptor and Megatec shutdown delay encoders |
+| `src/status.rs` | Public status and nominal-parameter data types |
+| `src/ups.rs` | Device enumeration/opening and USB transport I/O |
+| `src/wire.rs` | USB constants, logical report IDs, Cypress command map, decoders |
+| `src/bin.rs` | CLI: clap commands, formatting, exit codes, CLI helper tests |
+| `tests/public_api.rs` | Integration tests for public library API |
 | `Cargo.toml` | Manifest: edition 2024, lib + bin targets, 5 deps |
-| `PROTOCOL.md` | Wire protocol documentation (report IDs, formats, register bits, delay table) |
+| `PROTOCOL.md` | Wire protocol documentation (transports, report IDs, formats, register bits, delay tables) |
 | `README.md` | Usage, build instructions, API reference, permissions |
 
 ## Protocol Reference
 
 See `PROTOCOL.md` for the full wire-level specification. Key points for working with the code:
 
-- **Transport**: `GET_DESCRIPTOR(STRING, index)` — `bmRequestType=0x80`, `bRequest=0x06`, `wValue=0x0300|index`, `wIndex=0x00`, 96-byte buffer.
-- **Responses**: USB string descriptors (UTF-16LE). Decoded by `decode_string_descriptor()`: skip 2-byte header, take low byte of each UTF-16LE unit, drop nulls.
+- **MEC transport**: `GET_DESCRIPTOR(STRING, index)` — `bmRequestType=0x80`, `bRequest=0x06`, `wValue=0x0300|index`, `wIndex=0x00`, 96-byte buffer.
+- **Cypress transport**: ASCII Megatec commands in 8-byte zero-padded HID output reports — `bmRequestType=0x21`, `bRequest=0x09`, `wValue=0x0200`, `wIndex=0x00`; replies are read from interrupt endpoint `0x81`.
+- **MEC responses**: USB string descriptors (UTF-16LE). Decoded by `decode_string_descriptor()`: skip 2-byte header, take low byte of each UTF-16LE unit, drop nulls.
+- **Cypress responses**: ASCII bytes decoded by `decode_ascii_response()` until `\r`.
 - **Nominal format**: `#<voltage> <current> <battery_v> <frequency>`
 - **Current format**: `(<input_v> <fault_v> <output_v> <load%> <freq> <batt_v> <temp> <8-bit binary register>`
 - **Register bits** (0=LSB): beeper, shutdown_active, test_in_progress, offline, ups_fault, bypass_boost, battery_low, utility_fail.

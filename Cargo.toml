@@ -2,7 +2,7 @@
 name = "gcups"
 version = "0.1.0"
 edition = "2024"
-description = "GreenCell UPS monitor — reads battery and charging status via USB HID"
+description = "GreenCell UPS monitor and control tool for supported USB HID transports"
 
 [lib]
 name = "gcups"
