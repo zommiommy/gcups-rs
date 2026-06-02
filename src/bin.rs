@@ -623,12 +623,12 @@ fn register_byte(s: &gcups::UpsStatus) -> u8 {
 
 fn print_watch_header_human() {
     println!(
-        "# bits (high→low): Uf=utility_fail Bl=battery_low By=bypass_boost Fl=ups_fault \
-         Of=offline Ts=test_in_progress Sd=shutdown_active Bp=beeper_on"
+        "# flags: active status-register flags (\"mains\"/\"on-battery\" first); \
+         * marks a change since the previous row"
     );
     println!(
-        "{:>7}  {:>6} {:>6} {:>6} {:>5} {:>5} {:>6} {:>5}  {:<8}",
-        "t(s)", "Vin", "Vflt", "Vout", "Load", "Hz", "Vbat", "Temp", "register"
+        "{:>7}  {:>6} {:>6} {:>6} {:>5} {:>5} {:>6} {:>5}  flags",
+        "t(s)", "Vin", "Vflt", "Vout", "Load", "Hz", "Vbat", "Temp"
     );
 }
 
@@ -643,8 +643,9 @@ fn print_watch_row_human(t: f64, s: &gcups::UpsStatus, reg: u8, prev: Option<u8>
         " "
     };
     let diff = bit_diff(prev, reg);
+    let flags = flags_field(reg);
     println!(
-        "{t:>7.2}{marker} {:>6.1} {:>6.1} {:>6.1} {:>4.0}% {:>5.1} {:>6.2} {temp:>5}  {reg:08b}{diff}",
+        "{t:>7.2}{marker} {:>6.1} {:>6.1} {:>6.1} {:>4.0}% {:>5.1} {:>6.2} {temp:>5}  {flags}{diff}",
         s.input_voltage,
         s.input_voltage_fault,
         s.output_voltage,
@@ -681,6 +682,29 @@ fn bit_diff(prev: Option<u8>, cur: u8) -> String {
         }
     }
     format!("  [{}]", parts.join(", "))
+}
+
+/// Human-readable summary of the set status-register flags for the `watch`
+/// display: power source first, then any other active flags in
+/// most-significant-bit order. Easier to scan than the raw register byte.
+fn flags_field(reg: u8) -> String {
+    let mut parts: Vec<&str> = Vec::with_capacity(8);
+    parts.push(if (reg >> 7) & 1 == 1 { "on-battery" } else { "mains" });
+    const REST: [(u8, &str); 7] = [
+        (6, "battery-low"),
+        (5, "bypass/boost"),
+        (4, "fault"),
+        (3, "line-interactive"),
+        (2, "self-test"),
+        (1, "shutdown"),
+        (0, "beeper"),
+    ];
+    for (bit, label) in REST {
+        if (reg >> bit) & 1 == 1 {
+            parts.push(label);
+        }
+    }
+    parts.join(" ")
 }
 
 fn print_watch_header_csv() {
@@ -878,5 +902,18 @@ mod tests {
         let d = bit_diff(Some(0b00001000), 0b10001010);
         assert!(d.contains("utility_fail 0→1"), "got: {d}");
         assert!(d.contains("shutdown_active 0→1"), "got: {d}");
+    }
+
+    #[test]
+    fn flags_field_is_human_readable() {
+        // On mains, line-interactive, beeper on (offline + beeper set).
+        assert_eq!(flags_field(0b0000_1001), "mains line-interactive beeper");
+        // On battery, low, line-interactive (utility_fail + battery_low + offline).
+        assert_eq!(
+            flags_field(0b1100_1000),
+            "on-battery battery-low line-interactive"
+        );
+        // All clear -> just the power source.
+        assert_eq!(flags_field(0), "mains");
     }
 }

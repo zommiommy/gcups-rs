@@ -185,7 +185,7 @@ selector ambiguity, Cypress command mapping, and Cypress shutdown delay
 encoding. Integration tests cover public selector parsing, public device
 selectors, transport display strings, and public shutdown delay lookup. CLI
 tests cover duration parsing, status-register reconstruction, and watch
-bit-diff formatting.
+flag and bit-diff formatting.
 
 Tests do not require hardware — they exercise parsing, selection, and
 computation logic only. Run with `cargo test`.
