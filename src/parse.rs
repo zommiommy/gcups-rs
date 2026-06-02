@@ -1,3 +1,5 @@
+use core::fmt::Write as _;
+
 use crate::error::Error;
 use crate::status::{NominalParams, UpsStatus};
 use crate::wire::{ACK_RESPONSE, report};
@@ -117,6 +119,159 @@ pub(crate) fn parse_current(raw: &str, nominal: NominalParams) -> Result<UpsStat
     })
 }
 
+/// Parse the GreenCell Cypress "T" subprotocol response to `QS`.
+///
+/// The official Electron app decodes this as a stream of mostly-binary bytes:
+/// bytes are rendered as hex fields, spaces delimit fields, and `0x28` escapes
+/// control bytes. Example decoded frame:
+/// `#7501 6c 0001 6c 00 600b 12c000 e6 1e 0b 03\r`.
+pub(crate) fn parse_cypress_t_current(raw: &[u8]) -> Result<UpsStatus, Error> {
+    let decoded = decode_cypress_t(raw);
+    let raw = decoded.trim_end_matches('\r');
+    let body = raw.strip_prefix('#').ok_or_else(|| Error::Parse {
+        report_id: report::CURRENT_PARAMS,
+        detail: format!("missing '#' prefix in Cypress T response {decoded:?}"),
+    })?;
+
+    let f: Vec<&str> = body.split_whitespace().collect();
+    if f.len() != 11 {
+        return Err(Error::Parse {
+            report_id: report::CURRENT_PARAMS,
+            detail: format!(
+                "expected 11 Cypress T fields, got {} in {decoded:?}",
+                f.len()
+            ),
+        });
+    }
+
+    let h = |i: usize, name: &str| -> Result<u32, Error> {
+        u32::from_str_radix(f[i], 16).map_err(|e| Error::Parse {
+            report_id: report::CURRENT_PARAMS,
+            detail: format!("cannot parse Cypress T {name} ({:?}): {e}", f[i]),
+        })
+    };
+
+    let ab = h(0, "AB")?;
+    let c = h(1, "C")?;
+    let de = h(2, "DE")?;
+    let f_mult = h(3, "F")?;
+    let load = h(4, "G")?;
+    let hi = h(5, "HI")?;
+    let jkl = h(6, "JKL")?;
+    let m = h(7, "M")?;
+    let n = h(8, "N")?;
+    let reg = h(9, "O")? as u8;
+    let p = h(10, "P")? as u8;
+
+    let nominal = cypress_t_nominal(p)?;
+    let input_voltage = (ab * c) as f64 / 51.0 / 256.0;
+    let input_voltage_fault = -1.0;
+    let output_voltage = (de * f_mult) as f64 / 51.0 / 256.0;
+    let load_percent = f64::from(load);
+    let input_frequency = jkl as f64 / hi as f64;
+    let mut battery_voltage = (m * n) as f64 / 510.0;
+    let offline = (reg >> 3) & 1 == 1;
+
+    if !offline {
+        battery_voltage *= nominal.battery_voltage / ONLINE_PARALLEL_DIVISOR;
+    }
+
+    let battery_level = battery_level(battery_voltage, nominal.battery_voltage);
+
+    Ok(UpsStatus {
+        input_voltage,
+        input_voltage_fault,
+        output_voltage,
+        load_percent,
+        input_frequency,
+        battery_voltage,
+        temperature: None,
+        battery_level,
+        nominal,
+        beeper_on: reg & 1 == 1,
+        shutdown_active: (reg >> 1) & 1 == 1,
+        test_in_progress: (reg >> 2) & 1 == 1,
+        offline,
+        ups_fault: (reg >> 4) & 1 == 1,
+        bypass_or_boost: (reg >> 5) & 1 == 1,
+        battery_low: (reg >> 6) & 1 == 1,
+        utility_fail: (reg >> 7) & 1 == 1,
+    })
+}
+
+fn decode_cypress_t(raw: &[u8]) -> String {
+    let end = raw
+        .iter()
+        .position(|&b| b == b'\r')
+        .map_or(raw.len(), |i| i + 1);
+    let mut out = String::new();
+    let mut prev = None;
+
+    for &c in &raw[..end] {
+        if c == 0x28 && prev != Some(0x28) {
+            prev = Some(c);
+            continue;
+        }
+
+        match c {
+            b' ' => out.push(' '),
+            b'#' if out.is_empty() => out.push('#'),
+            b'\r' => out.push('\r'),
+            _ => {
+                let value = if prev == Some(0x28) {
+                    match c {
+                        0 => 0x0d,
+                        1 => 0x11,
+                        2 => 0x13,
+                        3 => 0x0a,
+                        4 => 0x20,
+                        _ => c,
+                    }
+                } else {
+                    c
+                };
+                let _ = write!(out, "{value:02x}");
+            }
+        }
+        prev = Some(c);
+    }
+
+    out
+}
+
+fn cypress_t_nominal(p: u8) -> Result<NominalParams, Error> {
+    let input_voltage = match p & 7 {
+        0 => 110.0,
+        1 => 120.0,
+        2 => 220.0,
+        3 => 230.0,
+        4 => 240.0,
+        _ => {
+            return Err(Error::Parse {
+                report_id: report::CURRENT_PARAMS,
+                detail: format!("unsupported Cypress T nominal input-voltage selector 0x{p:02x}"),
+            });
+        }
+    };
+
+    let battery_voltage = match (p >> 5) & 3 {
+        0 => 12.0,
+        1 => 24.0,
+        2 => 36.0,
+        3 => 48.0,
+        _ => unreachable!(),
+    };
+
+    let input_frequency = if (p >> 7) & 1 == 0 { 50.0 } else { 60.0 };
+
+    Ok(NominalParams {
+        input_voltage,
+        input_current: -1.0,
+        battery_voltage,
+        input_frequency,
+    })
+}
+
 fn battery_level(voltage: f64, nominal: f64) -> u8 {
     let low = BATTERY_V_LOW_FACTOR * nominal;
     let high = BATTERY_V_HIGH_FACTOR * nominal;
@@ -190,6 +345,30 @@ mod tests {
         // 2.10 * (24.0 / 2.0) = 25.2
         assert!((s.battery_voltage - 25.2).abs() < 0.01);
         assert_eq!(s.temperature, Some(25.0));
+    }
+
+    #[test]
+    fn parse_cypress_t_current_official_example() {
+        // Official GCUPS 1.1.11 example:
+        // UPSLM360 #7501 6c 0001 6c 00 600b 12c000 e6 1e 0b 03
+        let raw = [
+            b'#', 0x75, 0x01, b' ', 0x6c, b' ', 0x00, 0x01, b' ', 0x6c, b' ', 0x00, b' ', 0x60,
+            0x0b, b' ', 0x12, 0xc0, 0x00, b' ', 0xe6, b' ', 0x1e, b' ', 0x0b, b' ', 0x03, b'\r',
+        ];
+        let s = parse_cypress_t_current(&raw).unwrap();
+        assert_eq!(s.nominal.input_voltage, 230.0);
+        assert_eq!(s.nominal.input_current, -1.0);
+        assert_eq!(s.nominal.battery_voltage, 12.0);
+        assert_eq!(s.nominal.input_frequency, 50.0);
+        assert!((s.input_voltage - 247.78).abs() < 0.01);
+        assert!((s.input_frequency - 49.98).abs() < 0.01);
+        assert!((s.battery_voltage - 13.53).abs() < 0.01);
+        assert_eq!(s.temperature, None);
+        assert!(s.beeper_on);
+        assert!(s.shutdown_active);
+        assert!(s.offline);
+        assert!(!s.utility_fail);
+        assert_eq!(s.battery_level, 100);
     }
 
     #[test]

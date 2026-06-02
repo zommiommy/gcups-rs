@@ -2,8 +2,12 @@ use crate::error::Error;
 
 pub(crate) const MEC_VID: u16 = 0x0001;
 pub(crate) const MEC_PID: u16 = 0x0000;
+pub(crate) const MEC_ALT_VID: u16 = 0x09d6;
+pub(crate) const MEC_ALT_PID: u16 = 0x0001;
 pub(crate) const CYPRESS_VID: u16 = 0x0665;
 pub(crate) const CYPRESS_PID: u16 = 0x5161;
+pub(crate) const PROLIFIC_VID: u16 = 0x067b;
+pub(crate) const PROLIFIC_PID: u16 = 0x2303;
 
 /// bmRequestType: IN | Standard | Device.
 pub(crate) const BM_REQUEST_TYPE: u8 = 0x80;
@@ -22,6 +26,9 @@ pub(crate) const CYPRESS_SET_REPORT_REQUEST_TYPE: u8 = 0x21;
 pub(crate) const CYPRESS_SET_REPORT: u8 = 0x09;
 /// wValue: output report, report ID 0.
 pub(crate) const CYPRESS_OUTPUT_REPORT: u16 = 0x02 << 8;
+/// wValue: feature report, report ID 0. Used as a fallback when the device
+/// rejects the output report (matches the official app's retry path).
+pub(crate) const CYPRESS_FEATURE_REPORT: u16 = 0x03 << 8;
 pub(crate) const CYPRESS_INTERRUPT_IN: u8 = 0x81;
 pub(crate) const CYPRESS_PACKET_SIZE: usize = 8;
 pub(crate) const MEGATEC_MAX_COMMAND_LEN: usize = 10;
@@ -37,17 +44,17 @@ pub(crate) mod report {
     // Queries
     pub(crate) const PROTOCOL: u8 = 0x01;
     pub(crate) const PROTOCOL_VERSION: u8 = 0x02;
-    pub(crate) const CURRENT_PARAMS: u8 = 0x03; // Q1
-    pub(crate) const INFO: u8 = 0x0c; // I
+    pub(crate) const CURRENT_PARAMS: u8 = 0x03; // Q1 / QS
+    pub(crate) const INFO: u8 = 0x0c; // I / M
     pub(crate) const NOMINAL_PARAMS: u8 = 0x0d; // F
 
     // Commands
     pub(crate) const SHORT_TEST: u8 = 0x04; // T
-    pub(crate) const LONG_TEST: u8 = 0x05; // TL
+    pub(crate) const LONG_TEST: u8 = 0x05; // TL / T
     pub(crate) const BEEPER_TOGGLE: u8 = 0x07; // Q
     pub(crate) const SHUTDOWN: u8 = 0x08; // S
     pub(crate) const CANCEL_SHUTDOWN: u8 = 0x0a; // C
-    pub(crate) const CANCEL_TEST: u8 = 0x0b; // CT
+    pub(crate) const CANCEL_TEST: u8 = 0x0b; // CT / C
     pub(crate) const SHUTDOWN_RESTORE: u8 = 0x10; // SR
     pub(crate) const CANCEL_SHUTDOWN_RESTORE: u8 = 0x1a; // CSR
     pub(crate) const CANCEL_SHUTDOWN_RETURN: u8 = 0x2a; // CS
@@ -61,12 +68,12 @@ pub(crate) struct CypressReport {
 
 pub(crate) fn cypress_report(report_id: u8) -> Result<CypressReport, Error> {
     let report = match report_id {
-        report::CURRENT_PARAMS => CypressReport {
-            command: b"Q1\r",
+        report::PROTOCOL | report::PROTOCOL_VERSION | report::INFO => CypressReport {
+            command: b"M\r",
             expects_reply: true,
         },
-        report::INFO => CypressReport {
-            command: b"I\r",
+        report::CURRENT_PARAMS => CypressReport {
+            command: b"QS\r",
             expects_reply: true,
         },
         report::NOMINAL_PARAMS => CypressReport {
@@ -78,7 +85,7 @@ pub(crate) fn cypress_report(report_id: u8) -> Result<CypressReport, Error> {
             expects_reply: false,
         },
         report::LONG_TEST => CypressReport {
-            command: b"TL\r",
+            command: b"T\r",
             expects_reply: false,
         },
         report::BEEPER_TOGGLE => CypressReport {
@@ -92,7 +99,7 @@ pub(crate) fn cypress_report(report_id: u8) -> Result<CypressReport, Error> {
             expects_reply: false,
         },
         report::CANCEL_TEST => CypressReport {
-            command: b"CT\r",
+            command: b"C\r",
             expects_reply: false,
         },
         _ => return Err(Error::UnsupportedReport { report_id }),
@@ -137,23 +144,28 @@ mod tests {
     #[test]
     fn cypress_report_mapping_uses_megatec_commands() {
         let current = cypress_report(report::CURRENT_PARAMS).unwrap();
-        assert_eq!(current.command, b"Q1\r");
+        assert_eq!(current.command, b"QS\r");
         assert!(current.expects_reply);
 
         let nominal = cypress_report(report::NOMINAL_PARAMS).unwrap();
         assert_eq!(nominal.command, b"F\r");
         assert!(nominal.expects_reply);
 
+        let long_test = cypress_report(report::LONG_TEST).unwrap();
+        assert_eq!(long_test.command, b"T\r");
+        assert!(!long_test.expects_reply);
+
+        let cancel_test = cypress_report(report::CANCEL_TEST).unwrap();
+        assert_eq!(cancel_test.command, b"C\r");
+        assert!(!cancel_test.expects_reply);
+
         let cancel = cypress_report(report::CANCEL_SHUTDOWN_RESTORE).unwrap();
         assert_eq!(cancel.command, b"C\r");
         assert!(!cancel.expects_reply);
 
-        assert!(matches!(
-            cypress_report(report::PROTOCOL),
-            Err(Error::UnsupportedReport {
-                report_id: report::PROTOCOL
-            })
-        ));
+        let protocol = cypress_report(report::PROTOCOL).unwrap();
+        assert_eq!(protocol.command, b"M\r");
+        assert!(protocol.expects_reply);
     }
 
     #[test]

@@ -4,7 +4,9 @@ use crate::device::DeviceSelector;
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("UPS not found (supported VID:PID: 0001:0000, 0665:5161). Is it plugged in?")]
+    #[error(
+        "UPS not found (supported VID:PID: 0001:0000, 09d6:0001, 0665:5161, 067b:2303). Is it plugged in?"
+    )]
     DeviceNotFound,
 
     #[error("no UPS matches selector {selector}")]
@@ -44,4 +46,7 @@ pub enum Error {
 
     #[error("Parse error for report 0x{report_id:02x}: {detail}")]
     Parse { report_id: u8, detail: String },
+
+    #[error("Serial error: {detail}")]
+    Serial { detail: String },
 }

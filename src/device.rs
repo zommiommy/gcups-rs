@@ -1,7 +1,10 @@
 use core::fmt;
 use core::str::FromStr;
 
-use crate::wire::{CYPRESS_PID, CYPRESS_VID, MEC_PID, MEC_VID};
+use crate::wire::{
+    CYPRESS_PID, CYPRESS_VID, MEC_ALT_PID, MEC_ALT_VID, MEC_PID, MEC_VID, PROLIFIC_PID,
+    PROLIFIC_VID,
+};
 
 /// USB bus/address selector for one physical UPS instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,13 +15,16 @@ pub struct DeviceLocation {
 
 /// Selector accepted by [`Ups::open_with_selector`](crate::Ups::open_with_selector).
 ///
-/// Format: `VID:PID` or `VID:PID@BUS:ADDR`, where VID/PID are hexadecimal and
-/// BUS/ADDR are decimal USB bus and address numbers as printed by `gcups list`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Formats:
+/// - `VID:PID`
+/// - `VID:PID@BUS:ADDR` for USB HID devices
+/// - `VID:PID@PORT` for serial devices (for example, `067b:2303@COM4`)
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceSelector {
     pub vid: u16,
     pub pid: u16,
     pub location: Option<DeviceLocation>,
+    pub serial_path: Option<String>,
 }
 
 impl DeviceSelector {
@@ -27,6 +33,7 @@ impl DeviceSelector {
             vid,
             pid,
             location: None,
+            serial_path: None,
         }
     }
 
@@ -35,12 +42,26 @@ impl DeviceSelector {
             vid,
             pid,
             location: Some(DeviceLocation { bus, address }),
+            serial_path: None,
         }
     }
 
-    pub(crate) fn matches(&self, device: DeviceInfo) -> bool {
+    pub fn with_serial_path(vid: u16, pid: u16, path: impl Into<String>) -> Self {
+        Self {
+            vid,
+            pid,
+            location: None,
+            serial_path: Some(path.into()),
+        }
+    }
+
+    pub(crate) fn matches(&self, device: &DeviceInfo) -> bool {
         if self.vid != device.vid || self.pid != device.pid {
             return false;
+        }
+
+        if let Some(path) = &self.serial_path {
+            return device.serial_path.as_deref() == Some(path.as_str());
         }
 
         match self.location {
@@ -53,7 +74,10 @@ impl DeviceSelector {
 impl fmt::Display for DeviceSelector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut s = format!("{:04x}:{:04x}", self.vid, self.pid);
-        if let Some(location) = self.location {
+        if let Some(path) = &self.serial_path {
+            s += "@";
+            s += path;
+        } else if let Some(location) = self.location {
             s += &format!("@{:03}:{:03}", location.bus, location.address);
         }
         f.pad(&s)
@@ -73,24 +97,30 @@ impl FromStr for DeviceSelector {
 
         let (vid, pid) = id
             .split_once(':')
-            .ok_or_else(|| "expected VID:PID or VID:PID@BUS:ADDR".to_owned())?;
+            .ok_or_else(|| "expected VID:PID, VID:PID@BUS:ADDR, or VID:PID@PORT".to_owned())?;
 
         let vid = parse_hex_u16(vid, "VID")?;
         let pid = parse_hex_u16(pid, "PID")?;
         let Some(location) = location else {
             return Ok(DeviceSelector::new(vid, pid));
         };
+        if location.is_empty() {
+            return Err("selector after @ must not be empty".to_owned());
+        }
 
-        let (bus, address) = location
-            .split_once(':')
-            .ok_or_else(|| "expected BUS:ADDR after @".to_owned())?;
+        // A `bus:addr` tail (both halves all-decimal) is a USB physical-location
+        // selector; parse it strictly so a typo like `@1:999` errors instead of
+        // silently becoming a bogus serial path. Anything else is a serial path.
+        if let Some((bus, address)) = location.split_once(':')
+            && bus.bytes().all(|b| b.is_ascii_digit())
+            && address.bytes().all(|b| b.is_ascii_digit())
+        {
+            let bus = parse_decimal_u8(bus, "bus")?;
+            let address = parse_decimal_u8(address, "address")?;
+            return Ok(DeviceSelector::with_location(vid, pid, bus, address));
+        }
 
-        Ok(DeviceSelector::with_location(
-            vid,
-            pid,
-            parse_decimal_u8(bus, "bus")?,
-            parse_decimal_u8(address, "address")?,
-        ))
+        Ok(DeviceSelector::with_serial_path(vid, pid, location))
     }
 }
 
@@ -108,18 +138,20 @@ fn parse_decimal_u8(s: &str, name: &str) -> Result<u8, String> {
     s.parse().map_err(|e| format!("invalid {name}: {e}"))
 }
 
-/// USB transport used by a supported UPS.
+/// Transport used by a supported UPS.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpsTransport {
     Descriptor,
     CypressHid,
+    ProlificSerial,
 }
 
 impl fmt::Display for UpsTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             UpsTransport::Descriptor => f.write_str("MEC0003 descriptor"),
-            UpsTransport::CypressHid => f.write_str("Cypress HID Megatec/Q1"),
+            UpsTransport::CypressHid => f.write_str("Cypress HID GreenCell QS"),
+            UpsTransport::ProlificSerial => f.write_str("Prolific serial Q1"),
         }
     }
 }
@@ -138,25 +170,40 @@ pub(crate) const SUPPORTED_DEVICES: &[SupportedDevice] = &[
         transport: UpsTransport::Descriptor,
     },
     SupportedDevice {
+        vid: MEC_ALT_VID,
+        pid: MEC_ALT_PID,
+        transport: UpsTransport::Descriptor,
+    },
+    SupportedDevice {
         vid: CYPRESS_VID,
         pid: CYPRESS_PID,
         transport: UpsTransport::CypressHid,
     },
+    SupportedDevice {
+        vid: PROLIFIC_VID,
+        pid: PROLIFIC_PID,
+        transport: UpsTransport::ProlificSerial,
+    },
 ];
 
-/// A supported UPS currently visible on the USB bus.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A supported UPS currently visible on the bus.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceInfo {
     pub vid: u16,
     pub pid: u16,
     pub bus: u8,
     pub address: u8,
     pub transport: UpsTransport,
+    pub serial_path: Option<String>,
 }
 
 impl DeviceInfo {
     pub fn selector(&self) -> DeviceSelector {
-        DeviceSelector::with_location(self.vid, self.pid, self.bus, self.address)
+        if let Some(path) = &self.serial_path {
+            DeviceSelector::with_serial_path(self.vid, self.pid, path.clone())
+        } else {
+            DeviceSelector::with_location(self.vid, self.pid, self.bus, self.address)
+        }
     }
 }
 

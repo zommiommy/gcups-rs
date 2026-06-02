@@ -12,7 +12,7 @@ use serde::Serialize;
 #[command(version, about)]
 struct Cli {
     /// Select a UPS; use `gcups list` to see copy-pasteable selectors.
-    #[arg(long, global = true, value_name = "VID:PID[@BUS:ADDR]", value_parser = parse_device_selector)]
+    #[arg(long, global = true, value_name = "VID:PID[@BUS:ADDR|@PORT]", value_parser = parse_device_selector)]
     device: Option<gcups::DeviceSelector>,
 
     #[command(subcommand)]
@@ -374,15 +374,21 @@ fn run_list() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
 
-            println!("{:<22} {:<9} {:<7} Transport", "Selector", "VID:PID", "USB");
+            println!(
+                "{:<28} {:<9} {:<11} Transport",
+                "Selector", "VID:PID", "Bus/Addr"
+            );
             for device in devices {
+                let location = match &device.serial_path {
+                    Some(path) => path.clone(),
+                    None => format!("{:03}:{:03}", device.bus, device.address),
+                };
                 println!(
-                    "{:<22} {:04x}:{:04x} {:03}:{:03} {}",
+                    "{:<28} {:04x}:{:04x} {:<11} {}",
                     device.selector(),
                     device.vid,
                     device.pid,
-                    device.bus,
-                    device.address,
+                    location,
                     device.transport,
                 );
             }

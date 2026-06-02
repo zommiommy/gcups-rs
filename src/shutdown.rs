@@ -43,6 +43,7 @@ impl ShutdownDelay {
         match transport {
             UpsTransport::Descriptor => DescriptorShutdownDelay::from_duration(requested).delay,
             UpsTransport::CypressHid => MegatecShutdownDelay::from_duration(requested).delay,
+            UpsTransport::ProlificSerial => ProlificShutdownDelay::from_duration(requested).delay,
         }
     }
 
@@ -184,6 +185,30 @@ impl MegatecShutdownDelay {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProlificShutdownDelay {
+    pub(crate) delay: ShutdownDelay,
+    minutes: u64,
+}
+
+impl ProlificShutdownDelay {
+    pub(crate) fn from_duration(requested: Duration) -> Self {
+        let minutes = requested.as_secs() / 60;
+        Self {
+            delay: ShutdownDelay::new(minutes * 60),
+            minutes,
+        }
+    }
+
+    pub(crate) fn shutdown_command(&self) -> String {
+        format!("S{}\r", self.minutes)
+    }
+
+    pub(crate) fn shutdown_restore_command(&self) -> String {
+        format!("S{}R{}\r", self.minutes, self.minutes)
+    }
+}
+
 impl fmt::Display for ShutdownDelay {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}s", self.delay.as_secs())
@@ -215,5 +240,18 @@ mod tests {
         assert_eq!(&command[..len], b"S01\r");
         let len = sd.write_shutdown_command(&mut command, true);
         assert_eq!(&command[..len], b"S01R0000\r");
+    }
+
+    #[test]
+    fn prolific_shutdown_delay_lookup_and_encoding() {
+        let sd = ProlificShutdownDelay::from_duration(Duration::from_secs(30));
+        assert_eq!(sd.delay.actual_delay(), Duration::from_secs(0));
+        assert_eq!(sd.shutdown_command(), "S0\r");
+        assert_eq!(sd.shutdown_restore_command(), "S0R0\r");
+
+        let sd = ProlificShutdownDelay::from_duration(Duration::from_secs(130));
+        assert_eq!(sd.delay.actual_delay(), Duration::from_secs(120));
+        assert_eq!(sd.shutdown_command(), "S2\r");
+        assert_eq!(sd.shutdown_restore_command(), "S2R2\r");
     }
 }

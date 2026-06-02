@@ -1,16 +1,18 @@
 # gcups
 
-Rust driver and CLI for GreenCell UPS devices using either the MEC0003
-descriptor transport or the Cypress HID Megatec/Q1 transport (`0665:5161`).
+Rust driver and CLI for GreenCell UPS devices using three official transport
+families from the GCUPS app:
+- MEC0003 descriptor HID (`0001:0000`, and the app's extra `09d6:0001`)
+- Cypress HID GreenCell QS (`0665:5161`)
+- Prolific serial Q1 (`067b:2303`, UPS17)
 
-Communicates over USB HID to read battery status, electrical parameters,
-and send commands (shutdown, self-test, beeper toggle, etc.). No Docker,
+Communicates over USB HID or USB serial to read battery status, electrical parameters,
 no Electron, no proprietary runtime -- just a single static binary or a
 library you can embed.
 
-The MEC0003 descriptor transport was reverse-engineered from the official
-[gcups](https://github.com/fajfer/gcups) Electron app. The Cypress transport
-uses the same Megatec/Q1 commands over HID reports.
+The MEC0003 descriptor transport and Cypress QS command set were
+reverse-engineered from the official [gcups](https://github.com/fajfer/gcups)
+Electron app.
 See [PROTOCOL.md](PROTOCOL.md) for the full wire-level documentation.
 
 ## CLI
@@ -102,9 +104,10 @@ full `VID:PID@BUS:ADDR` selector.
 `--device`:
 
 ```
-Selector               VID:PID   USB     Transport
-0001:0000@005:003      0001:0000 005:003 MEC0003 descriptor
-0665:5161@001:004      0665:5161 001:004 Cypress HID Megatec/Q1
+Selector                     VID:PID   Bus/Addr    Transport
+0001:0000@005:003            0001:0000 005:003    MEC0003 descriptor
+0665:5161@001:004            0665:5161 001:004    Cypress HID GreenCell QS
+067b:2303@/dev/ttyUSB0       067b:2303 /dev/ttyUSB0 Prolific serial Q1
 ```
 
 Selector forms:
@@ -112,16 +115,17 @@ Selector forms:
 | Form | Meaning |
 |------|---------|
 | `VID:PID` | Selects a device type; valid only when exactly one matching device is connected |
-| `VID:PID@BUS:ADDR` | Selects one physical USB device; required for two UPSes of the same type |
+| `VID:PID@BUS:ADDR` | Selects one physical USB HID device |
+| `VID:PID@PORT` | Selects one serial device by path (for example `COM4` or `/dev/ttyUSB0`) |
 
 Examples:
 
 ```
-gcups --device 0665:5161 status
 gcups --device 0665:5161@001:004 status
+gcups --device 067b:2303@COM4 status
 ```
 
-`list` does not open or claim the UPS; it only enumerates supported USB devices.
+`list` does not open or claim the UPS; it only enumerates supported USB and serial devices.
 
 ### Exit codes
 
@@ -269,13 +273,18 @@ cargo build --release
 
 ## Permissions
 
-The UPS shows up as a HID device. By default only root can access it.
-Either run as root or add udev rules for the supported transports:
+USB/HID transports usually require root or matching udev rules. Serial devices
+may additionally require access to `/dev/ttyUSB*`/`/dev/ttyACM*` or the Windows
+COM port.
+
+Linux udev rules for the supported transports:
 
 ```
 # /etc/udev/rules.d/99-gcups.rules
 SUBSYSTEM=="usb", ATTRS{idVendor}=="0001", ATTRS{idProduct}=="0000", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="09d6", ATTRS{idProduct}=="0001", MODE="0666"
 SUBSYSTEM=="usb", ATTRS{idVendor}=="0665", ATTRS{idProduct}=="5161", MODE="0666"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="067b", ATTRS{idProduct}=="2303", MODE="0666"
 ```
 
 On NixOS:
@@ -283,7 +292,9 @@ On NixOS:
 ```nix
 services.udev.extraRules = ''
   SUBSYSTEM=="usb", ATTRS{idVendor}=="0001", ATTRS{idProduct}=="0000", MODE="0666"
+  SUBSYSTEM=="usb", ATTRS{idVendor}=="09d6", ATTRS{idProduct}=="0001", MODE="0666"
   SUBSYSTEM=="usb", ATTRS{idVendor}=="0665", ATTRS{idProduct}=="5161", MODE="0666"
+  SUBSYSTEM=="tty", ATTRS{idVendor}=="067b", ATTRS{idProduct}=="2303", MODE="0666"
 '';
 ```
 

@@ -20,7 +20,7 @@ pub struct NominalParams {
 
 /// Live UPS status — electrical readings and decoded status flags.
 ///
-/// Returned by combining the `F` and `Q1` reports.
+/// Returned by combining nominal and current data for the active transport.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct UpsStatus {
     /// Current input (mains) voltage.
