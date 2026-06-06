@@ -126,42 +126,19 @@ pub(crate) fn parse_current(raw: &str, nominal: NominalParams) -> Result<UpsStat
 /// control bytes. Example decoded frame:
 /// `#7501 6c 0001 6c 00 600b 12c000 e6 1e 0b 03\r`.
 pub(crate) fn parse_cypress_t_current(raw: &[u8]) -> Result<UpsStatus, Error> {
-    let decoded = decode_cypress_t(raw);
-    let raw = decoded.trim_end_matches('\r');
-    let body = raw.strip_prefix('#').ok_or_else(|| Error::Parse {
-        report_id: report::CURRENT_PARAMS,
-        detail: format!("missing '#' prefix in Cypress T response {decoded:?}"),
-    })?;
+    let f = parse_cypress_t_fields(raw)?;
 
-    let f: Vec<&str> = body.split_whitespace().collect();
-    if f.len() != 11 {
-        return Err(Error::Parse {
-            report_id: report::CURRENT_PARAMS,
-            detail: format!(
-                "expected 11 Cypress T fields, got {} in {decoded:?}",
-                f.len()
-            ),
-        });
-    }
-
-    let h = |i: usize, name: &str| -> Result<u32, Error> {
-        u32::from_str_radix(f[i], 16).map_err(|e| Error::Parse {
-            report_id: report::CURRENT_PARAMS,
-            detail: format!("cannot parse Cypress T {name} ({:?}): {e}", f[i]),
-        })
-    };
-
-    let ab = h(0, "AB")?;
-    let c = h(1, "C")?;
-    let de = h(2, "DE")?;
-    let f_mult = h(3, "F")?;
-    let load = h(4, "G")?;
-    let hi = h(5, "HI")?;
-    let jkl = h(6, "JKL")?;
-    let m = h(7, "M")?;
-    let n = h(8, "N")?;
-    let reg = h(9, "O")? as u8;
-    let p = h(10, "P")? as u8;
+    let ab = f[0];
+    let c = f[1];
+    let de = f[2];
+    let f_mult = f[3];
+    let load = f[4];
+    let hi = f[5];
+    let jkl = f[6];
+    let m = f[7];
+    let n = f[8];
+    let reg = f[9] as u8;
+    let p = f[10] as u8;
 
     let nominal = cypress_t_nominal(p)?;
     let input_voltage = (ab * c) as f64 / 51.0 / 256.0;
@@ -199,6 +176,118 @@ pub(crate) fn parse_cypress_t_current(raw: &[u8]) -> Result<UpsStatus, Error> {
     })
 }
 
+const CYPRESS_T_FIELD_WIDTHS: [usize; 11] = [2, 1, 2, 1, 1, 2, 3, 1, 1, 1, 1];
+const CYPRESS_T_FIELD_NAMES: [&str; 11] =
+    ["AB", "C", "DE", "F", "G", "HI", "JKL", "M", "N", "O", "P"];
+
+fn parse_cypress_t_fields(raw: &[u8]) -> Result<[u32; 11], Error> {
+    if raw.first() != Some(&b'#') {
+        return Err(cypress_t_parse_error(format!(
+            "missing '#' prefix in Cypress T response {:?}",
+            decode_cypress_t(raw)
+        )));
+    }
+
+    let end = raw.iter().position(|&b| b == b'\r').unwrap_or(raw.len());
+    let mut offset = 1;
+    let mut fields = [0u32; 11];
+
+    for (i, (&width, name)) in CYPRESS_T_FIELD_WIDTHS
+        .iter()
+        .zip(CYPRESS_T_FIELD_NAMES)
+        .enumerate()
+    {
+        if i > 0 {
+            offset = consume_cypress_t_separators(raw, offset, name)?;
+        }
+
+        let mut value = 0u32;
+        for byte_index in 0..width {
+            let (byte, next) = read_cypress_t_data_byte(raw, offset, name)?;
+            if byte == b' ' || byte == b'\r' {
+                return Err(cypress_t_parse_error(format!(
+                    "short Cypress T field {name}: separator at byte {byte_index} in {:?}",
+                    decode_cypress_t(raw)
+                )));
+            }
+            value = (value << 8) | u32::from(byte);
+            offset = next;
+        }
+        fields[i] = value;
+    }
+
+    if offset != end {
+        return Err(cypress_t_parse_error(format!(
+            "extra Cypress T bytes before terminator at offset {offset} in {:?}",
+            decode_cypress_t(raw)
+        )));
+    }
+
+    Ok(fields)
+}
+
+fn consume_cypress_t_separators(
+    raw: &[u8],
+    mut offset: usize,
+    next_field: &str,
+) -> Result<usize, Error> {
+    let start = offset;
+
+    loop {
+        match raw.get(offset) {
+            Some(b' ') => offset += 1,
+            Some(0x28) if raw.get(offset + 1) == Some(&0x04) => offset += 2,
+            Some(0x28) if raw.get(offset + 1) == Some(&b' ') => offset += 2,
+            _ => break,
+        }
+    }
+
+    if offset == start {
+        return Err(cypress_t_parse_error(format!(
+            "missing Cypress T separator before field {next_field} in {:?}",
+            decode_cypress_t(raw)
+        )));
+    }
+
+    Ok(offset)
+}
+
+fn read_cypress_t_data_byte(raw: &[u8], offset: usize, field: &str) -> Result<(u8, usize), Error> {
+    let Some(&byte) = raw.get(offset) else {
+        return Err(cypress_t_parse_error(format!(
+            "short Cypress T response while reading field {field} in {:?}",
+            decode_cypress_t(raw)
+        )));
+    };
+
+    if byte != 0x28 {
+        return Ok((byte, offset + 1));
+    }
+
+    let Some(&escaped) = raw.get(offset + 1) else {
+        return Err(cypress_t_parse_error(format!(
+            "truncated Cypress T escape while reading field {field} in {:?}",
+            decode_cypress_t(raw)
+        )));
+    };
+
+    let value = match escaped {
+        0 => 0x0d,
+        1 => 0x11,
+        2 => 0x13,
+        3 => 0x0a,
+        4 => 0x20,
+        _ => escaped,
+    };
+    Ok((value, offset + 2))
+}
+
+fn cypress_t_parse_error(detail: String) -> Error {
+    Error::Parse {
+        report_id: report::CURRENT_PARAMS,
+        detail,
+    }
+}
 fn decode_cypress_t(raw: &[u8]) -> String {
     let end = raw
         .iter()
@@ -377,6 +466,33 @@ mod tests {
         assert_eq!(battery_level(21.0, 24.0), 0);
         assert_eq!(battery_level(30.0, 24.0), 100);
         assert_eq!(battery_level(23.58, 24.0), 50); // midpoint
+    }
+
+    #[test]
+    fn parse_cypress_t_current_handles_escaped_field_separator() {
+        // Some Cypress T units escape a separator as `0x28 0x04` (`0x20`) and
+        // may also leave an adjacent literal space. The old whitespace parser
+        // treated the escaped byte as part of `DE`, yielding a five-digit output
+        // voltage. The fixed parser uses field widths and treats it as a
+        // separator.
+        let raw = [
+            b'#', 0x6b, 0x01, b' ', 0x6c, b' ', 0x6b, 0x01, 0x28, 0x04, b' ', 0x6c, b' ', 0x00,
+            b' ', 0x5f, 0xf6, b' ', 0x13, 0x12, 0xd0, b' ', 0xdd, b' ', 0x3c, b' ', 0x09, b' ',
+            0x23, b'\r',
+        ];
+        let s = parse_cypress_t_current(&raw).unwrap();
+        assert!((s.output_voltage - 226.60).abs() < 0.01);
+        assert!((s.battery_voltage - 26.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_cypress_t_current_rejects_extra_non_separator_bytes() {
+        let raw = [
+            b'#', 0x6b, 0x01, b' ', 0x6c, b' ', 0x6b, 0x01, 0x7f, b' ', 0x6c, b' ', 0x00, b' ',
+            0x5f, 0xf6, b' ', 0x13, 0x12, 0xd0, b' ', 0xdd, b' ', 0x3c, b' ', 0x09, b' ', 0x23,
+            b'\r',
+        ];
+        assert!(parse_cypress_t_current(&raw).is_err());
     }
 
     #[test]
