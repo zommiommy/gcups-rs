@@ -28,6 +28,10 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_millis(3000);
 /// Cypress command. Bounded well below `DEFAULT_TIMEOUT` so commands the device
 /// never answers (the common case) return promptly instead of blocking.
 const CYPRESS_ACK_TIMEOUT: Duration = Duration::from_millis(250);
+/// Per-read timeout while draining the interrupt-IN endpoint at open. Buffered
+/// packets return within a poll interval, so an empty endpoint costs a single
+/// such wait — paid once per open, never on the polling hot path.
+const CYPRESS_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
 const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// How long to wait for an optional acknowledgement after a fire-and-forget
@@ -243,14 +247,24 @@ fn open_selected(candidate: DeviceCandidate) -> Result<Ups, Error> {
         }
     };
 
-    Ok(Ups {
+    let ups = Ups {
         vid: info.vid,
         pid: info.pid,
         transport: info.transport,
         handle: RefCell::new(handle),
         timeout: DEFAULT_TIMEOUT,
         cypress_protocol: Cell::new(None),
-    })
+    };
+
+    // GreenCell Cypress firmware buffers a command's reply in the interrupt
+    // endpoint and waits for the host to read it. A previous run killed
+    // mid-reply (e.g. Ctrl-C during `watch`) leaves a stale tail there; flush
+    // it before the first command so replies stay aligned with their queries.
+    if matches!(ups.transport, UpsTransport::CypressHid) {
+        ups.cypress_drain();
+    }
+
+    Ok(ups)
 }
 
 impl Ups {
@@ -783,6 +797,35 @@ impl Ups {
         }
 
         Ok(buf[..len].to_vec())
+    }
+
+    /// Discard interrupt-IN data left buffered by a previous, possibly
+    /// interrupted session before the first command.
+    ///
+    /// GreenCell Cypress firmware queues a command's reply in the interrupt
+    /// endpoint and waits for the host to read it. A `watch` killed with Ctrl-C
+    /// mid-reply leaves the unread tail in that FIFO; without this flush the
+    /// next run reads the stale tail and every reply is shifted by one query —
+    /// surfacing as e.g. `parse error for report 0x0d: missing '#' prefix`.
+    /// This is the interrupt-endpoint analog of the input flush the serial
+    /// transport performs before each write.
+    fn cypress_drain(&self) {
+        let mut handle = self.handle.borrow_mut();
+        let UpsHandle::Usb(handle) = &mut *handle else {
+            return;
+        };
+        let mut scratch = [0u8; CYPRESS_PACKET_SIZE];
+        // A full reply is at most BUF_SIZE and only a tail can remain, so this
+        // bound comfortably exceeds any leftover while capping a device that
+        // streams without pause.
+        for _ in 0..BUF_SIZE / CYPRESS_PACKET_SIZE {
+            match handle.read_interrupt(CYPRESS_INTERRUPT_IN, &mut scratch, CYPRESS_DRAIN_TIMEOUT) {
+                Ok(n) if n > 0 => trace("DRAIN", 0, &scratch[..n]),
+                // Empty (timeout), zero-length packet, or a transient error: the
+                // endpoint is clear or unreadable. Best-effort, so stop quietly.
+                _ => return,
+            }
+        }
     }
 
     fn cypress_read_optional_response(&self, report_id: u8) -> Result<Option<String>, Error> {
