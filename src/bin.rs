@@ -74,7 +74,11 @@ enum Command {
     /// Read protocol version.
     ProtocolVersion,
 
-    /// Read a raw report by descriptor index / logical report ID.
+    /// Dump a raw report's response bytes verbatim (binary-safe).
+    ///
+    /// Writes the device's reply to stdout unmodified — no text decoding — so
+    /// binary frames survive being redirected to a file. Use `info`, `protocol`,
+    /// `status`, etc. for decoded views.
     Raw {
         /// Descriptor index or logical report ID (decimal or 0x-prefixed hex).
         #[arg(value_parser = parse_u8)]
@@ -455,7 +459,15 @@ fn run(ups: gcups::Ups, command: Command) -> Result<ExitCode, gcups::Error> {
         }
 
         Command::Raw { index } => {
-            println!("{}", ups.read_descriptor(index)?);
+            // Emit the device's response bytes verbatim. The reply may be binary
+            // (e.g. the Cypress `T` `QS` frame), so routing it through a String +
+            // `println!` would drop NULs and mangle bytes >= 0x80 into UTF-8 —
+            // corrupting a redirected `.bin` capture.
+            use std::io::Write as _;
+            let bytes = ups.read_report_raw(index)?;
+            let mut stdout = std::io::stdout();
+            let _ = stdout.write_all(&bytes);
+            let _ = stdout.flush();
             Ok(ExitCode::SUCCESS)
         }
 
@@ -689,7 +701,11 @@ fn bit_diff(prev: Option<u8>, cur: u8) -> String {
 /// most-significant-bit order. Easier to scan than the raw register byte.
 fn flags_field(reg: u8) -> String {
     let mut parts: Vec<&str> = Vec::with_capacity(8);
-    parts.push(if (reg >> 7) & 1 == 1 { "on-battery" } else { "mains" });
+    parts.push(if (reg >> 7) & 1 == 1 {
+        "on-battery"
+    } else {
+        "mains"
+    });
     const REST: [(u8, &str); 7] = [
         (6, "battery-low"),
         (5, "bypass/boost"),

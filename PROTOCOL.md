@@ -318,10 +318,12 @@ MEC0003 report `I` (`0x0c`) returns a padded model string, e.g.:
 
 Trim whitespace and the leading `#` to extract the model designation.
 
-Cypress maps the logical info report to command `M\r`, which returns only the
-protocol subtype (`T` or `V`) in the official app. Model resolution for Cypress
-devices is inferred from nominal battery voltage, nominal current (when known),
-and topology against the official known-device table.
+Cypress maps the logical info report to command `M\r` in the official app, but
+that command returns only the protocol subtype (`T` or `V`), not a model string.
+The Rust public `device_info()` therefore treats Cypress model information as
+unsupported; CLI `status` falls back to `unknown`. Model resolution for Cypress
+devices would have to be inferred from nominal battery voltage, nominal current
+(when known), and topology against the official known-device table.
 
 ## Shutdown delay mapping
 

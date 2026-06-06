@@ -378,4 +378,21 @@ mod tests {
         assert_eq!(battery_level(30.0, 24.0), 100);
         assert_eq!(battery_level(23.58, 24.0), 50); // midpoint
     }
+
+    #[test]
+    fn raw_report_dump_round_trips_through_t_parser() {
+        use crate::wire::{decode_ascii_response, response_payload};
+        // The documented Cypress T QS frame (NULs + high bytes), as it arrives on
+        // the wire.
+        let frame: &[u8] = &[
+            b'#', 0x75, 0x01, b' ', 0x6c, b' ', 0x00, 0x01, b' ', 0x6c, b' ', 0x00, b' ', 0x60,
+            0x0b, b' ', 0x12, 0xc0, 0x00, b' ', 0xe6, b' ', 0x1e, b' ', 0x0b, b' ', 0x03, b'\r',
+        ];
+        // Byte-faithful `raw` output stays decodable as a real status frame.
+        assert!(parse_cypress_t_current(response_payload(frame)).is_ok());
+        // The old text-decoding `raw` path dropped NULs and re-encoded high bytes
+        // to UTF-8, corrupting the frame past recovery.
+        let mangled = decode_ascii_response(frame).into_bytes();
+        assert!(parse_cypress_t_current(&mangled).is_err());
+    }
 }

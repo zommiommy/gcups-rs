@@ -16,10 +16,11 @@ use crate::shutdown::{
 };
 use crate::status::{NominalParams, UpsStatus};
 use crate::wire::{
-    ACK_RESPONSE, B_REQUEST, BM_REQUEST_TYPE, BUF_SIZE, CYPRESS_FEATURE_REPORT, CYPRESS_INTERRUPT_IN,
-    CYPRESS_OUTPUT_REPORT, CYPRESS_PACKET_SIZE, CYPRESS_SET_REPORT,
+    ACK_RESPONSE, B_REQUEST, BM_REQUEST_TYPE, BUF_SIZE, CYPRESS_FEATURE_REPORT,
+    CYPRESS_INTERRUPT_IN, CYPRESS_OUTPUT_REPORT, CYPRESS_PACKET_SIZE, CYPRESS_SET_REPORT,
     CYPRESS_SET_REPORT_REQUEST_TYPE, DESC_TYPE_STRING, MEGATEC_MAX_COMMAND_LEN, W_INDEX,
-    cypress_report, decode_ascii_response, decode_string_descriptor, report,
+    cypress_report, decode_ascii_response, decode_string_descriptor, descriptor_payload, report,
+    response_payload,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(3000);
@@ -311,18 +312,41 @@ impl Ups {
 
     /// Read the protocol identifier string.
     pub fn protocol(&self) -> Result<String, Error> {
-        self.read_descriptor(report::PROTOCOL)
+        match self.transport {
+            UpsTransport::CypressHid => Ok("QS".to_owned()),
+            _ => {
+                let raw = self.read_descriptor(report::PROTOCOL)?;
+                Ok(Self::clean_report_text(&raw))
+            }
+        }
     }
 
     /// Read the protocol version string.
     pub fn protocol_version(&self) -> Result<String, Error> {
-        self.read_descriptor(report::PROTOCOL_VERSION)
+        match self.transport {
+            UpsTransport::CypressHid => {
+                Ok(Self::cypress_protocol_marker(self.cypress_protocol()?).to_owned())
+            }
+            _ => {
+                let raw = self.read_descriptor(report::PROTOCOL_VERSION)?;
+                Ok(Self::clean_report_text(&raw))
+            }
+        }
     }
 
     /// Read the device info string (e.g. `"2000VA"`).
     pub fn device_info(&self) -> Result<String, Error> {
+        if matches!(self.transport, UpsTransport::CypressHid) {
+            return Err(Error::UnsupportedReport {
+                report_id: report::INFO,
+            });
+        }
+
         let raw = self.read_descriptor(report::INFO)?;
-        Ok(raw.trim().trim_start_matches('#').trim().to_owned())
+        Ok(Self::clean_report_text(&raw)
+            .trim_start_matches('#')
+            .trim()
+            .to_owned())
     }
 
     /// Read the nominal (rated) parameters.
@@ -510,6 +534,53 @@ impl Ups {
         }
     }
 
+    /// Read a raw report by descriptor index / logical report ID and return the
+    /// device's response bytes verbatim.
+    ///
+    /// Unlike [`read_descriptor`](Self::read_descriptor), the reply is *not*
+    /// decoded to text: NUL bytes are kept and bytes `>= 0x80` are returned
+    /// as-is rather than re-encoded to UTF-8. Binary replies — notably the
+    /// Cypress `T` `QS` frame, which legitimately contains NULs and high bytes —
+    /// are therefore dumped exactly as received instead of being corrupted. Use
+    /// this to capture a faithful copy of a report for debugging or off-line
+    /// decoding; [`read_descriptor`](Self::read_descriptor) remains the right
+    /// choice for the ASCII reports the higher-level queries parse.
+    pub fn read_report_raw(&self, index: u8) -> Result<Vec<u8>, Error> {
+        match self.transport {
+            UpsTransport::Descriptor => {
+                let (buf, n) = self.read_descriptor_bytes(index)?;
+                Ok(descriptor_payload(&buf[..n]))
+            }
+            UpsTransport::CypressHid => {
+                let report = cypress_report(index)?;
+                let raw = if report.expects_reply {
+                    self.cypress_query_raw(index, report.command)?
+                } else {
+                    self.cypress_write_command(index, report.command)?;
+                    self.cypress_read_optional_response_raw(index)?
+                        .unwrap_or_default()
+                };
+                Ok(response_payload(&raw).to_vec())
+            }
+            UpsTransport::ProlificSerial => match index {
+                report::PROTOCOL => Ok(b"Prolific".to_vec()),
+                report::PROTOCOL_VERSION => Ok(b"prolific".to_vec()),
+                _ => {
+                    let command = Self::serial_query_command(index)?
+                        .ok_or(Error::UnsupportedReport { report_id: index })?;
+                    let out = self.serial_io(index, command, self.timeout)?;
+                    if out.is_empty() {
+                        return Err(Error::ResponseTooShort {
+                            report_id: index,
+                            len: 0,
+                        });
+                    }
+                    Ok(response_payload(&out).to_vec())
+                }
+            },
+        }
+    }
+
     fn cypress_status(&self) -> Result<UpsStatus, Error> {
         self.cypress_current_status(None)
     }
@@ -555,6 +626,14 @@ impl Ups {
     }
 
     fn read_string_descriptor(&self, index: u8) -> Result<String, Error> {
+        let (buf, n) = self.read_descriptor_bytes(index)?;
+        Ok(decode_string_descriptor(&buf[..n]))
+    }
+
+    /// Issue the `GET_DESCRIPTOR(STRING, index)` control transfer and return the
+    /// raw response buffer plus its length. Shared by the text decoder and the
+    /// byte-faithful raw reader.
+    fn read_descriptor_bytes(&self, index: u8) -> Result<([u8; BUF_SIZE], usize), Error> {
         let mut buf = [0u8; BUF_SIZE];
         let n = {
             let mut handle = self.handle.borrow_mut();
@@ -579,7 +658,7 @@ impl Ups {
             });
         }
 
-        Ok(decode_string_descriptor(&buf[..n]))
+        Ok((buf, n))
     }
 
     fn send_descriptor_command(&self, report_id: u8) -> Result<(), Error> {
@@ -694,8 +773,8 @@ impl Ups {
     }
 
     fn send_serial_command(&self, report_id: u8) -> Result<(), Error> {
-        let command = Self::serial_query_command(report_id)?
-            .ok_or(Error::UnsupportedReport { report_id })?;
+        let command =
+            Self::serial_query_command(report_id)?.ok_or(Error::UnsupportedReport { report_id })?;
         self.serial_command(report_id, command)
     }
 
@@ -836,6 +915,17 @@ impl Ups {
         }
     }
 
+    /// Byte-faithful variant of [`Self::cypress_read_optional_response`]: returns
+    /// the raw reply bytes (or `None` on the no-answer timeout) without the lossy
+    /// text decode.
+    fn cypress_read_optional_response_raw(&self, report_id: u8) -> Result<Option<Vec<u8>>, Error> {
+        match self.cypress_read_response_raw(report_id, CYPRESS_ACK_TIMEOUT) {
+            Ok(resp) => Ok(Some(resp)),
+            Err(Error::Usb(rusb::Error::Timeout)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     fn send_cypress_command(&self, report_id: u8, command: &[u8]) -> Result<(), Error> {
         // Detect the sub-protocol *before* writing so the optional `M` query
         // cannot interleave with this command's reply.
@@ -884,6 +974,18 @@ impl Ups {
                 detail: format!("unknown Cypress sub-protocol marker {other:?}"),
             }),
         }
+    }
+
+    fn cypress_protocol_marker(protocol: CypressProtocol) -> &'static str {
+        match protocol {
+            CypressProtocol::T => "T",
+            CypressProtocol::V => "V",
+        }
+    }
+
+    fn clean_report_text(raw: &str) -> String {
+        raw.trim_matches(|c: char| c.is_ascii_control() || c.is_whitespace())
+            .to_owned()
     }
 
     /// Decide whether a Cypress command succeeded from its sub-protocol and
@@ -1032,5 +1134,18 @@ mod tests {
             Ups::parse_cypress_protocol_marker("X"),
             Err(Error::Parse { .. })
         ));
+    }
+
+    #[test]
+    fn report_metadata_text_strips_control_terminators() {
+        assert_eq!(Ups::clean_report_text("V\r"), "V");
+        assert_eq!(Ups::clean_report_text("\n\t#2000VA\r\n"), "#2000VA");
+        assert!(!Ups::clean_report_text("T\r").contains('\r'));
+    }
+
+    #[test]
+    fn cypress_protocol_marker_formats_for_status_metadata() {
+        assert_eq!(Ups::cypress_protocol_marker(CypressProtocol::T), "T");
+        assert_eq!(Ups::cypress_protocol_marker(CypressProtocol::V), "V");
     }
 }

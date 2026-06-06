@@ -81,9 +81,9 @@ Defined in `mod report` inside `wire.rs`. Queries: `PROTOCOL` (`0x01`, Cypress `
 | `open_with_selector(DeviceSelector)` | — | `Result<Ups, Error>` |
 | `status()` | F+Q1 or QS | `Result<UpsStatus, Error>` |
 | `nominal_params()` | F or QS | `Result<NominalParams, Error>` |
-| `device_info()` | I or M | `Result<String, Error>` |
-| `protocol()` | 0x01 | `Result<String, Error>` |
-| `protocol_version()` | 0x02 | `Result<String, Error>` |
+| `device_info()` | I | `Result<String, Error>`; Cypress has no real model report, so this is unsupported there |
+| `protocol()` | 0x01 | `Result<String, Error>`; Cypress reports `QS` |
+| `protocol_version()` | 0x02 | `Result<String, Error>`; Cypress reports sub-protocol `T` or `V` |
 | `short_test()` | T | `Result<(), Error>` |
 | `long_test()` | TL | `Result<(), Error>` |
 | `cancel_test()` | CT | `Result<(), Error>` |
@@ -95,6 +95,7 @@ Defined in `mod report` inside `wire.rs`. Queries: `PROTOCOL` (`0x01`, Cypress `
 | `cancel_shutdown_return()` | CS | `Result<(), Error>` |
 | `wake_up()` | C | `Result<(), Error>` |
 | `read_descriptor(u8)` | any | `Result<String, Error>` |
+| `read_report_raw(u8)` | any | `Result<Vec<u8>, Error>` (verbatim bytes, binary-safe) |
 
 ## CLI (bin.rs)
 

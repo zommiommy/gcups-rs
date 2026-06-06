@@ -137,6 +137,37 @@ pub(crate) fn decode_ascii_response(raw: &[u8]) -> String {
         .collect()
 }
 
+/// Byte-faithful descriptor payload: the low byte of each UTF-16LE code unit
+/// after the 2-byte header, returned verbatim.
+///
+/// Unlike [`decode_string_descriptor`], NUL bytes and bytes `>= 0x80` are kept
+/// exactly as received instead of being dropped or remapped to multi-byte
+/// UTF-8. Binary reports therefore survive intact, so a raw report dump
+/// mirrors the wire instead of corrupting it.
+pub(crate) fn descriptor_payload(raw: &[u8]) -> Vec<u8> {
+    const HEADER_LEN: usize = 2;
+    raw.get(HEADER_LEN..)
+        .unwrap_or(&[])
+        .iter()
+        .copied()
+        .step_by(2) // low byte of each UTF-16LE code unit
+        .collect()
+}
+
+/// Byte-faithful response payload: every byte up to and including the first
+/// carriage return, returned verbatim.
+///
+/// Unlike [`decode_ascii_response`], NUL bytes and bytes `>= 0x80` are
+/// preserved, so a binary reply (e.g. the Cypress `T` `QS` frame) is dumped
+/// exactly as the device sent it.
+pub(crate) fn response_payload(raw: &[u8]) -> &[u8] {
+    let end = raw
+        .iter()
+        .position(|&b| b == b'\r')
+        .map_or(raw.len(), |i| i + 1);
+    &raw[..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +224,33 @@ mod tests {
         assert_eq!(decode_string_descriptor(&[]), "");
         assert_eq!(decode_string_descriptor(&[46]), "");
         assert_eq!(decode_string_descriptor(&[46, 3]), "");
+    }
+
+    #[test]
+    fn descriptor_payload_is_byte_faithful() {
+        // Low bytes carry a NUL (0x00) and a high byte (0xf6); both must survive
+        // verbatim, while the text decode drops the NUL and balloons 0xf6 into
+        // two UTF-8 bytes.
+        let raw: &[u8] = &[8, 3, 0x23, 0, 0x00, 0, 0xf6, 0];
+        assert_eq!(descriptor_payload(raw), vec![0x23, 0x00, 0xf6]);
+        assert_eq!(decode_string_descriptor(raw), "#\u{f6}");
+        assert_eq!(descriptor_payload(&[]), Vec::<u8>::new());
+        assert_eq!(descriptor_payload(&[46, 3]), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn response_payload_preserves_binary_cypress_t_frame() {
+        // Documented Cypress T QS frame: contains four NULs and high bytes. The
+        // lossy ASCII decode behind the old `raw` path corrupts it; the raw
+        // payload must return it verbatim.
+        let frame: &[u8] = &[
+            b'#', 0x75, 0x01, b' ', 0x6c, b' ', 0x00, 0x01, b' ', 0x6c, b' ', 0x00, b' ', 0x60,
+            0x0b, b' ', 0x12, 0xc0, 0x00, b' ', 0xe6, b' ', 0x1e, b' ', 0x0b, b' ', 0x03, b'\r',
+        ];
+        assert_eq!(response_payload(frame), frame);
+        // Stops at the first carriage return, keeping trailing junk out.
+        assert_eq!(response_payload(b"#\0\x01\xc0\rtail"), b"#\0\x01\xc0\r");
+        // The old text path drops the NULs, so its byte length no longer matches.
+        assert_ne!(decode_ascii_response(frame).into_bytes().len(), frame.len());
     }
 }

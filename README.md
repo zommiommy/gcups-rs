@@ -78,7 +78,8 @@ $ gcups nominal --json
 $ gcups info                # model string (e.g. "2000VA")
 $ gcups protocol            # protocol identifier
 $ gcups protocol-version    # protocol version
-$ gcups raw 0x0d            # raw report read by logical ID
+$ gcups raw 0x0d            # dump a report's response bytes verbatim (binary-safe)
+$ gcups raw 3 > raw_3.bin   # capture a raw frame for off-line decoding
 $ gcups test-short          # start ~10 s battery self-test
 $ gcups test-long           # start ~10 min battery self-test
 $ gcups test-cancel         # cancel running test
@@ -213,9 +214,9 @@ ups.toggle_beeper()?;
 | `Ups::open_with_selector(sel)`  | Open a selected UPS                       |
 | `ups.status()`                  | Live readings and status flags            |
 | `ups.nominal_params()`          | Rated specifications                      |
-| `ups.device_info()`             | Model string (e.g. "2000VA")             |
+| `ups.device_info()`             | Model string when transport exposes one   |
 | `ups.protocol()`                | Protocol identifier                      |
-| `ups.protocol_version()`        | Protocol version                         |
+| `ups.protocol_version()`        | Protocol version / Cypress subtype       |
 | `ups.short_test()`              | Start ~10 s battery test                 |
 | `ups.long_test()`               | Start ~10 min battery test               |
 | `ups.cancel_test()`             | Cancel running test                      |
@@ -226,7 +227,8 @@ ups.toggle_beeper()?;
 | `ups.cancel_shutdown_restore()` | Cancel shutdown-and-restore              |
 | `ups.cancel_shutdown_return()`  | Cancel shutdown-return                   |
 | `ups.wake_up()`                 | Restore power                            |
-| `ups.read_descriptor(index)`    | Raw low-level report read                |
+| `ups.read_descriptor(index)`    | Low-level report read, decoded to text   |
+| `ups.read_report_raw(index)`    | Low-level report read, raw bytes (binary-safe) |
 
 ## Installation
 
